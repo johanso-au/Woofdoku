@@ -329,7 +329,7 @@
       <li>Dogs can't <b>touch</b> each other, not even diagonally.</li>
       <li><b>Tap</b> a square to mark it ✕. <b>Drag</b> across squares to mark lots at once (drag from an ✕ to erase).</li>
       <li><b>Double-tap / right-click</b> places a dog. Or switch the tap mode to “Dog”.</li>
-      <li>A wrong dog costs a <b>❤</b>. Lose all 3 and you'll need to try again.</li>
+      <li>A wrong dog costs a <b>❤</b>. So does marking ✕ on a square where a dog belongs, and that dog is then revealed. Lose all 3 and you'll need to try again.</li>
       <li>Every level has exactly <b>one solution</b>, and you can always reach it by logic. You never need to guess.</li>
       <li>A <b>free square</b> has no ✕ and isn't in line with, in the same territory as, or touching a dog you've placed.</li>
       <li><b>🦴 Hint</b> shows the next logical step on the board and explains it.</li>
@@ -880,6 +880,7 @@ let hearts = MAX_HEARTS, seconds = 0, over = false, hintsUsed = 0;
 let everX = new Set();                      // squares ever marked ✕ this attempt (for scoring)
 let luckyCells = new Set();
 let wrongCells = new Set();                 // squares that already cost a heart this puzzle
+let revealed = new Set();                   // dogs revealed by an ✕ placed on their square
 let undoStack = [];
 let timerId = null, cursor = -1, lastTap = { i: -1, t: 0 }, hint = null;
 
@@ -900,7 +901,7 @@ function askPersist() {
 function snapshot() {
   return {
     play, level, P: play === 'endless' ? P : null, run: run && { ...run },
-    marks: Array.from(marks), hearts, seconds, over, hintsUsed, everX: [...everX], lucky: [...luckyCells], wrong: [...wrongCells],
+    marks: Array.from(marks), hearts, seconds, over, hintsUsed, everX: [...everX], lucky: [...luckyCells], wrong: [...wrongCells], revealed: [...revealed],
   };
 }
 function save() {
@@ -1076,6 +1077,8 @@ function paint(i) {
     drag.group.push([i, 1]); marks[i] = 0; sfx.unmark();
   } else {
     if (marks[i] !== 0) return;
+    startTimer();
+    if (solSet.has(i)) { revealDog(i); return; } // swiped an ✕ over a dog's square
     drag.group.push([i, 0]); marks[i] = 1; everX.add(i); sfx.mark();
   }
   startTimer();
@@ -1083,12 +1086,24 @@ function paint(i) {
   drawCell(i);
 }
 
+// Taps: a single tap marks ✕ straight away. If that ✕ lands on a dog's square, the penalty
+// waits until the double-tap window has passed: the first tap of a double-tap (which places
+// a dog) must not count as a mistake. Every ✕ looks the same meanwhile, so nothing is given away.
+const DOUBLE_TAP_MS = 330;
+function settleTap() {
+  const t = lastTap;
+  if (!t.timer) return;
+  clearTimeout(t.timer);
+  t.timer = null;
+  if (marks[t.i] === 1 && solSet.has(t.i)) revealDog(t.i);
+}
+
 function onTap(i) {
   if (over) return;
   const now = performance.now();
-  if (settings.mode === 'dog') { lastTap = { i: -1, t: 0 }; placeDog(i); return; }
-  if (lastTap.i === i && now - lastTap.t < 330) {
+  if (lastTap.i === i && now - lastTap.t < DOUBLE_TAP_MS && settings.mode !== 'dog') {
     // double-tap: undo the ✕ the first tap made, then place a dog
+    clearTimeout(lastTap.timer);
     if (lastTap.pushed && undoStack.length) {
       const g = undoStack.pop();
       for (let k = g.length - 1; k >= 0; k--) { marks[g[k][0]] = g[k][1]; drawCell(g[k][0]); }
@@ -1098,8 +1113,13 @@ function onTap(i) {
     placeDog(i);
     return;
   }
+  settleTap(); // decide any ✕ still waiting from the previous tap
+  if (over) return;
+  if (settings.mode === 'dog') { lastTap = { i: -1, t: 0 }; placeDog(i); return; }
   const added = marks[i] === 0 && !everX.has(i);
-  lastTap = { i, t: now, pushed: toggleX(i), added };
+  const tap = { i, t: now, pushed: toggleX(i), added, timer: null };
+  if (marks[i] === 1 && solSet.has(i)) tap.timer = setTimeout(settleTap, DOUBLE_TAP_MS);
+  lastTap = tap;
 }
 
 document.addEventListener('keydown', e => {
@@ -1125,7 +1145,10 @@ document.addEventListener('keydown', e => {
   if (k === 'z' || k === 'backspace') { e.preventDefault(); undo(); return; }
   if (k === 'h') { showHint(); return; }
   if (cursor < 0 || over) return;
-  if (k === 'x' || k === ' ') { e.preventDefault(); sfx.unlock(); toggleX(cursor); }
+  if (k === 'x' || k === ' ') {
+    e.preventDefault(); sfx.unlock(); toggleX(cursor);
+    if (marks[cursor] === 1 && solSet.has(cursor)) revealDog(cursor);
+  }
   if (k === 'd' || k === 'enter') { e.preventDefault(); sfx.unlock(); placeDog(cursor); }
 });
 
@@ -1202,6 +1225,35 @@ function placeDog(i) {
   drawStatus(); save();
 }
 
+// An ✕ on a square where a dog belongs costs a heart (once per square) and reveals that dog.
+// A revealed dog stays put: Undo and Clear leave it alone.
+function revealDog(i) {
+  if (over || marks[i] === 2 || !solSet.has(i)) return;
+  clearHint();
+  // the ✕ never really counted: drop it from the undo history and from the ✕ score
+  undoStack = undoStack.map(g => g.filter(([c]) => c !== i)).filter(g => g.length);
+  everX.delete(i);
+  const first = !revealed.has(i);
+  revealed.add(i);
+  if (first) hearts--;
+  marks[i] = 2;
+  if (settings.autoX) {
+    const g = [];
+    for (const p of peers[i]) if (marks[p] === 0) { g.push([p, 0]); marks[p] = 1; everX.add(p); drawCell(p); }
+    if (g.length) undoStack.push(g);
+  }
+  drawCell(i);
+  const el = cellEls[i];
+  el.classList.remove('bad'); void el.offsetWidth; el.classList.add('bad');
+  drawHearts(first ? hearts : -1);
+  sfx.whine();
+  if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
+  if (hearts <= 0) { drawStatus(); save(); lose(); return; }
+  toast('Oops! A dog was hiding under that ✕. It cost a heart, but now you know where it lives.', 3000, true);
+  if (dogCount() === 8) win();
+  drawStatus(); save();
+}
+
 function undo() {
   if (over || !undoStack.length) return;
   clearHint();
@@ -1214,7 +1266,7 @@ function undo() {
 function clearBoard() {
   if (over) return;
   const g = [];
-  for (let i = 0; i < 64; i++) if (marks[i]) { g.push([i, marks[i]]); marks[i] = 0; }
+  for (let i = 0; i < 64; i++) if (marks[i] && !revealed.has(i)) { g.push([i, marks[i]]); marks[i] = 0; }
   if (!g.length) return;
   undoStack.push(g);
   clearHint();
@@ -1718,7 +1770,7 @@ function setPuzzle(p) {
 
 function resetBoard(h) {
   marks = new Uint8Array(64); hearts = h; seconds = 0; over = false; hintsUsed = 0;
-  everX = new Set(); luckyCells = new Set(); wrongCells = new Set(); undoStack = []; cursor = -1; hint = null;
+  everX = new Set(); luckyCells = new Set(); wrongCells = new Set(); revealed = new Set(); undoStack = []; cursor = -1; hint = null;
   stopTimer();
   $('hintbox').hidden = true;
 }
@@ -1741,7 +1793,7 @@ function restore(g) {
   else { level = g.level; setPuzzle(levelPuzzle(g.level)); }
   resetBoard(g.hearts);
   marks = Uint8Array.from(g.marks); seconds = g.seconds || 0; over = !!g.over; hintsUsed = g.hintsUsed || 0;
-  everX = new Set(g.everX || []); luckyCells = new Set(g.lucky || []); wrongCells = new Set(g.wrong || []);
+  everX = new Set(g.everX || []); luckyCells = new Set(g.lucky || []); wrongCells = new Set(g.wrong || []); revealed = new Set(g.revealed || []);
   buildBoard(); drawHearts(); drawStatus();
   if (seconds > 0 && !over) startTimer();
 }
