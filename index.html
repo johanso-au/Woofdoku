@@ -335,6 +335,7 @@
       <li><b>🦴 Hint</b> shows the next logical step on the board and explains it.</li>
       <li><b>♾️ Endless mode</b> (in Levels): random puzzles that get harder as you go. Hearts carry over between puzzles, and a flawless solve wins one back. How far can you get?</li>
       <li><b>Score</b>: be quick, keep your hearts, skip the hints, and use as few ✕s as you can. Finishing with no ✕s at all earns a big bonus.</li>
+      <li>Your progress, scores and badges are saved <b>only on this device</b>, in this browser. They aren't sent anywhere. Clearing your browser's site data erases them.</li>
       <li>Keyboard: arrow keys move, <kbd>X</kbd>/<kbd>Space</kbd> marks, <kbd>D</kbd>/<kbd>Enter</kbd> places a dog, <kbd>Z</kbd> undoes, <kbd>H</kbd> gives a hint.</li>
     </ul>
   </details>
@@ -881,10 +882,20 @@ let luckyCells = new Set();
 let undoStack = [];
 let timerId = null, cursor = -1, lastTap = { i: -1, t: 0 }, hint = null;
 
+// Everything (settings, progress, scores, badges, games in progress) lives only in this
+// browser's localStorage under SAVE_KEY. Nothing is ever sent over the network.
 const store = {
   get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } },
+  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true; } catch (e) { return false; } },
 };
+let saveWarned = false;
+// Ask the browser to keep our data even when it's short on space (granted silently in most browsers).
+let persistAsked = false;
+function askPersist() {
+  if (persistAsked || !navigator.storage || !navigator.storage.persist) return;
+  persistAsked = true;
+  navigator.storage.persisted().then(p => p || navigator.storage.persist()).catch(() => { /* not supported */ });
+}
 function snapshot() {
   return {
     play, level, P: play === 'endless' ? P : null, run: run && { ...run },
@@ -892,7 +903,11 @@ function snapshot() {
   };
 }
 function save() {
-  store.set(SAVE_KEY, { settings, progress, game: P && snapshot(), endlessSnap });
+  const ok = store.set(SAVE_KEY, { settings, progress, game: P && snapshot(), endlessSnap });
+  if (!ok && !saveWarned) {
+    saveWarned = true;
+    toast('⚠️ This browser is blocking storage (private mode?), so scores won\'t be saved after you close it.', 5000);
+  }
 }
 
 // Endless difficulty ramp: 2 Easy, 3 Medium, 4 Tricky, then Expert forever.
@@ -1432,6 +1447,7 @@ function win() {
   if (sc.total >= 2000) unlock('roller');
   if (new Date().getHours() < 5) unlock('night');
   save();
+  askPersist(); // first win: there's now progress worth protecting
 
   boardEl.classList.add('won');
   setTimeout(() => sfx.win(), 250);
