@@ -879,6 +879,7 @@ let marks = new Uint8Array(64);             // 0 empty, 1 ✕, 2 dog
 let hearts = MAX_HEARTS, seconds = 0, over = false, hintsUsed = 0;
 let everX = new Set();                      // squares ever marked ✕ this attempt (for scoring)
 let luckyCells = new Set();
+let wrongCells = new Set();                 // squares that already cost a heart this puzzle
 let undoStack = [];
 let timerId = null, cursor = -1, lastTap = { i: -1, t: 0 }, hint = null;
 
@@ -899,7 +900,7 @@ function askPersist() {
 function snapshot() {
   return {
     play, level, P: play === 'endless' ? P : null, run: run && { ...run },
-    marks: Array.from(marks), hearts, seconds, over, hintsUsed, everX: [...everX], lucky: [...luckyCells],
+    marks: Array.from(marks), hearts, seconds, over, hintsUsed, everX: [...everX], lucky: [...luckyCells], wrong: [...wrongCells],
   };
 }
 function save() {
@@ -1004,8 +1005,10 @@ function stopTimer() { clearInterval(timerId); timerId = null; }
 
 // ---------- Toasts (queued so badges don't overwrite each other) ----------
 const toastQ = [];
-let toastBusy = false;
-function toast(msg, ms = 2200) {
+let toastBusy = false, toastTimer = null;
+// `now` replaces whatever is showing (for instant feedback on what you just tapped)
+function toast(msg, ms = 2200, now = false) {
+  if (now) { toastQ.unshift([msg, ms]); clearTimeout(toastTimer); nextToast(); return; }
   toastQ.push([msg, ms]);
   if (!toastBusy) nextToast();
 }
@@ -1015,7 +1018,7 @@ function nextToast() {
   toastBusy = true;
   const t = $('toast');
   t.textContent = it[0]; t.classList.add('show');
-  setTimeout(() => { t.classList.remove('show'); setTimeout(nextToast, 300); }, it[1]);
+  toastTimer = setTimeout(() => { t.classList.remove('show'); toastTimer = setTimeout(nextToast, 300); }, it[1]);
 }
 
 // =====================================================================
@@ -1179,16 +1182,22 @@ function placeDog(i) {
     }
     if (dogCount() === 8) win();
   } else {
-    hearts--;
-    undoStack.push([[i, marks[i]]]);
-    marks[i] = 1; // the square is now known to be empty (not counted against your ✕ score)
+    // a square only ever costs one heart, even if its ✕ was cleared and it's tried again
+    const repeat = wrongCells.has(i);
+    if (!repeat) { wrongCells.add(i); hearts--; }
+    if (marks[i] !== 1) { undoStack.push([[i, marks[i]]]); marks[i] = 1; } // now known empty (not counted against your ✕ score)
     drawCell(i);
     el.classList.remove('bad'); void el.offsetWidth; el.classList.add('bad');
-    drawHearts(hearts);
-    sfx.whine();
-    if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
-    if (hearts > 0) toast(pick(['Ruff! No dog belongs there.', 'Grr… wrong spot!', 'Whimper… not that one.', 'That spot has fleas! 🐜']));
-    else lose();
+    if (repeat) {
+      sfx.unmark();
+      toast('You already found out no dog goes here. No heart lost.', 2200, true);
+    } else {
+      drawHearts(hearts);
+      sfx.whine();
+      if (navigator.vibrate) navigator.vibrate([60, 40, 60]);
+      if (hearts > 0) toast(pick(['Ruff! No dog belongs there.', 'Grr… wrong spot!', 'Whimper… not that one.', 'That spot has fleas! 🐜']), 2200, true);
+      else lose();
+    }
   }
   drawStatus(); save();
 }
@@ -1709,7 +1718,7 @@ function setPuzzle(p) {
 
 function resetBoard(h) {
   marks = new Uint8Array(64); hearts = h; seconds = 0; over = false; hintsUsed = 0;
-  everX = new Set(); luckyCells = new Set(); undoStack = []; cursor = -1; hint = null;
+  everX = new Set(); luckyCells = new Set(); wrongCells = new Set(); undoStack = []; cursor = -1; hint = null;
   stopTimer();
   $('hintbox').hidden = true;
 }
@@ -1732,7 +1741,7 @@ function restore(g) {
   else { level = g.level; setPuzzle(levelPuzzle(g.level)); }
   resetBoard(g.hearts);
   marks = Uint8Array.from(g.marks); seconds = g.seconds || 0; over = !!g.over; hintsUsed = g.hintsUsed || 0;
-  everX = new Set(g.everX || []); luckyCells = new Set(g.lucky || []);
+  everX = new Set(g.everX || []); luckyCells = new Set(g.lucky || []); wrongCells = new Set(g.wrong || []);
   buildBoard(); drawHearts(); drawStatus();
   if (seconds > 0 && !over) startTimer();
 }
