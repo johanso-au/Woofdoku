@@ -182,6 +182,12 @@
   .breakdown .tot { font-weight: 900; font-size: 18px; border-top: 2px dashed var(--ledge); padding-top: 6px; margin-top: 2px; }
   .flag { display: inline-block; background: #fff1c2; color: #a86b00; border-radius: 999px; padding: 3px 10px; font-size: 13px; font-weight: 900; margin-top: 10px; }
 
+  .loading { color: #fff; font-weight: 900; font-size: 18px; text-align: center; }
+  .loading svg { width: 120px; height: 70px; display: block; margin: 0 auto 8px; animation: hop .35s ease-in-out infinite alternate; }
+  .btn.endless { width: 100%; margin: 6px 0 4px; padding: 12px; }
+  .btn.endless span { font-size: 17px; }
+  .btn.endless small { font-size: 12px; font-weight: 700; opacity: .92; }
+  h3.sec { font-size: 16px; font-weight: 900; margin: 18px 0 0; }
   .lv-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 8px; }
   .tier-h { grid-column: 1 / -1; text-align: left; font-size: 12px; font-weight: 900; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; margin: 8px 0 0; }
   .lv { border: 0; border-radius: 12px; padding: 8px 0 5px; background: var(--soft); color: var(--ink); font: inherit; font-weight: 900; font-size: 16px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 1px; }
@@ -327,6 +333,7 @@
       <li>Every level has exactly <b>one solution</b>, and you can always reach it by logic. You never need to guess.</li>
       <li>A <b>free square</b> has no ✕ and isn't in line with, in the same territory as, or touching a dog you've placed.</li>
       <li><b>🦴 Hint</b> shows the next logical step on the board and explains it.</li>
+      <li><b>♾️ Endless mode</b> (in Levels): random puzzles that get harder as you go. Hearts carry over between puzzles, and a flawless solve wins one back. How far can you get?</li>
       <li><b>Score</b>: be quick, keep your hearts, skip the hints, and use as few ✕s as you can. Finishing with no ✕s at all earns a big bonus.</li>
       <li>Keyboard: arrow keys move, <kbd>X</kbd>/<kbd>Space</kbd> marks, <kbd>D</kbd>/<kbd>Enter</kbd> places a dog, <kbd>Z</kbd> undoes, <kbd>H</kbd> gives a hint.</li>
     </ul>
@@ -338,6 +345,10 @@
 
 <div class="overlay" id="overlay">
   <div class="modal" id="modal"></div>
+</div>
+
+<div class="overlay" id="loading">
+  <div class="loading"><svg viewBox="0 0 120 70"><use href="#dachs"/></svg>Fetching a fresh puzzle…</div>
 </div>
 
 <script>
@@ -651,13 +662,10 @@ function refineRegions(sol, reg, rng, caps, maxSteps = 1500) {
   return cnt === 1;
 }
 
-// Level n is always the same puzzle (fixed seed), so scores are comparable.
-// A few candidates that fit the tier are generated, sorted by effort, and the one
-// matching the level's position inside its tier is chosen -> difficulty climbs steadily.
-function generateLevel(n) {
-  const tier = tierOf(n);
-  const rng = mulberry32(n * 104729 + 17);
-  const want = 3, found = [];
+// Generate `want` verified puzzles that fit `tier`, sort them by effort and return the one
+// at relative position `pos` (0 = easiest). Falls back to the closest miss if none fit.
+function generateForTier(tier, rng, want = 1, pos = 0, n = 0) {
+  const found = [];
   let fallback = null, fbScore = Infinity;
   for (let t = 0; t < 700 && found.length < want; t++) {
     const sol = genSolution(rng);
@@ -674,8 +682,20 @@ function generateLevel(n) {
   }
   if (!found.length) return fallback || Object.assign({}, BACKUP, { level: n });
   found.sort((a, b) => a.effort - b.effort);
-  const pos = tier.to > tier.from ? (n - tier.from) / (tier.to - tier.from) : 0;
   return found[Math.round(pos * (found.length - 1))];
+}
+
+// Level n is always the same puzzle (fixed seed), so scores are comparable.
+// (Only used if the pre-built LEVELS data is missing.)
+function generateLevel(n) {
+  const tier = tierOf(n);
+  const pos = tier.to > tier.from ? (n - tier.from) / (tier.to - tier.from) : 0;
+  return generateForTier(tier, mulberry32(n * 104729 + 17), 3, pos, n);
+}
+
+// Endless mode: a fresh random puzzle from tier `tierIdx`.
+function generateRandom(tierIdx, seed) {
+  return Object.assign(generateForTier(TIERS[tierIdx], mulberry32(seed)), { tierIdx, seed });
 }
 
 // Pre-verified emergency puzzle (unique + logic-solvable; only used if generation somehow fails).
@@ -846,9 +866,13 @@ const $ = id => document.getElementById(id);
 const boardEl = $('board');
 
 let settings = { sound: true, autoX: false, mode: 'x', v: 2 };
-let progress = { unlocked: 1, current: 1, best: {}, top: [], ach: {}, hintsTotal: 0, streak: 0, failed: {} };
+const freshProgress = () => ({ unlocked: 1, current: 1, best: {}, top: [], ach: {}, hintsTotal: 0, streak: 0, failed: {}, runs: [] });
+let progress = freshProgress();
 
-// current level
+// current puzzle
+let play = 'level';      // 'level' or 'endless'
+let run = null;          // endless run: { k: puzzle number, solved, score, heartsStart }
+let endlessSnap = null;  // paused endless run while playing levels
 let level = 1, P = null, peers = null, solSet = null;
 let marks = new Uint8Array(64);             // 0 empty, 1 ✕, 2 dog
 let hearts = MAX_HEARTS, seconds = 0, over = false, hintsUsed = 0;
@@ -861,12 +885,20 @@ const store = {
   get(k) { try { return JSON.parse(localStorage.getItem(k)); } catch (e) { return null; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) { /* storage unavailable */ } },
 };
-function save() {
-  store.set(SAVE_KEY, {
-    settings, progress,
-    game: P && { level, marks: Array.from(marks), hearts, seconds, over, hintsUsed, everX: [...everX], lucky: [...luckyCells] },
-  });
+function snapshot() {
+  return {
+    play, level, P: play === 'endless' ? P : null, run: run && { ...run },
+    marks: Array.from(marks), hearts, seconds, over, hintsUsed, everX: [...everX], lucky: [...luckyCells],
+  };
 }
+function save() {
+  store.set(SAVE_KEY, { settings, progress, game: P && snapshot(), endlessSnap });
+}
+
+// Endless difficulty ramp: 2 Easy, 3 Medium, 4 Tricky, then Expert forever.
+const endlessTierIdx = k => k <= 2 ? 1 : k <= 5 ? 2 : k <= 9 ? 3 : 4;
+const ENDLESS_EQ_LEVEL = [3, 10, 20, 32, 45]; // level number used for scoring/par in each tier
+const scoreLevel = () => play === 'endless' ? ENDLESS_EQ_LEVEL[P.tierIdx] : level;
 
 const fmtTime = s => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 const fmtNum = n => n.toLocaleString('en-US');
@@ -927,15 +959,20 @@ function drawHearts(breakIdx = -1) {
 }
 
 function drawStatus() {
-  $('lvNum').textContent = `Level ${level}`;
-  $('lvTier').textContent = tierOf(level).name;
+  const endless = play === 'endless';
+  $('lvNum').textContent = endless ? `♾️ Endless #${run.k}` : `Level ${level}`;
+  $('lvTier').textContent = endless ? TIERS[P.tierIdx].name : tierOf(level).name;
   $('timer').textContent = fmtTime(seconds);
   $('undoBtn').disabled = !undoStack.length || over;
   $('hintBtn').disabled = over;
   $('clearBtn').disabled = over;
-  const best = progress.best[level];
-  $('meta').textContent = `Par ${fmtTime(parTime(level))}` + (best ? ` · Best ${fmtNum(best.score)} ${'★'.repeat(best.stars)}` : '') +
-    ` · ${Object.keys(progress.ach).length}/${ACHIEVEMENTS.length} badges`;
+  if (endless) {
+    $('meta').textContent = `Run score ${fmtNum(run.score)} · ${run.solved} solved · Par ${fmtTime(parTime(scoreLevel()))}`;
+  } else {
+    const best = progress.best[level];
+    $('meta').textContent = `Par ${fmtTime(parTime(level))}` + (best ? ` · Best ${fmtNum(best.score)} ${'★'.repeat(best.stars)}` : '') +
+      ` · ${Object.keys(progress.ach).length}/${ACHIEVEMENTS.length} badges`;
+  }
 }
 
 // ---------- Timer ----------
@@ -1323,6 +1360,8 @@ const ACHIEVEMENTS = [
   { id: 'roller', icon: '💯', name: 'High Roller', desc: 'Score 2,000+ points on a single level.' },
   { id: 'night', icon: '🌙', name: 'Night Owl', desc: 'Solve a level between midnight and 5 am.' },
   { id: 'hints', icon: '🔍', name: 'Hint Hound', desc: 'Use 10 hints in total.' },
+  { id: 'leash', icon: '🦮', name: 'Off the Leash', desc: 'Solve 5 puzzles in one Endless run.' },
+  { id: 'marathon', icon: '🏃', name: 'Marathon Mutt', desc: 'Solve 15 puzzles in one Endless run.' },
 ];
 function unlock(id) {
   if (progress.ach[id]) return;
@@ -1337,42 +1376,59 @@ function unlock(id) {
 // =====================================================================
 //  WIN / LOSE
 // =====================================================================
+const scoreRow = (label, val, cls = '') => `<span class="${cls}">${label}</span><span class="${cls}">${val}</span>`;
+const signed = v => (v < 0 ? '−' : '+') + fmtNum(Math.abs(v));
+
 function win() {
   over = true; stopTimer(); clearHint();
-  const run = { level, seconds, xCount: everX.size, hearts, hints: hintsUsed };
-  const sc = computeScore(run), stars = starsFor(run);
+  const endless = play === 'endless';
+  const lost = (endless ? run.heartsStart : MAX_HEARTS) - hearts; // hearts lost on THIS puzzle
+  const r = { level: scoreLevel(), seconds, xCount: everX.size, hearts, hints: hintsUsed };
+  const sc = computeScore(r), stars = starsFor({ hearts: MAX_HEARTS - lost, hints: hintsUsed });
+  let flags = '';
 
-  const prev = progress.best[level];
-  const newBest = !prev || sc.total > prev.score;
-  progress.best[level] = {
-    score: Math.max(sc.total, prev ? prev.score : 0),
-    stars: Math.max(stars, prev ? prev.stars : 0),
-    time: Math.min(seconds, prev ? prev.time : Infinity),
-  };
-  if (level < MAX_LEVEL) progress.unlocked = Math.max(progress.unlocked, level + 1);
-  const entry = { score: sc.total, level, time: seconds, stars, date: Date.now() };
-  progress.top.push(entry);
-  progress.top.sort((a, b) => b.score - a.score);
-  progress.top = progress.top.slice(0, 10);
-  const rank = progress.top.indexOf(entry);
-  progress.streak = hearts === MAX_HEARTS ? (progress.streak || 0) + 1 : 0;
+  if (endless) {
+    run.solved++;
+    run.score += sc.total;
+    if (!lost && hearts < MAX_HEARTS) { hearts++; drawHearts(); flags += '<div class="flag">💖 Flawless solve: +1 heart</div>'; }
+    run.hearts = hearts;
+    flags += `<div class="flag">♾️ Run: ${run.solved} solved · ${fmtNum(run.score)} points</div>`;
+    if (run.solved >= 5) unlock('leash');
+    if (run.solved >= 15) unlock('marathon');
+  } else {
+    const prev = progress.best[level];
+    progress.best[level] = {
+      score: Math.max(sc.total, prev ? prev.score : 0),
+      stars: Math.max(stars, prev ? prev.stars : 0),
+      time: Math.min(seconds, prev ? prev.time : Infinity),
+    };
+    if (level < MAX_LEVEL) progress.unlocked = Math.max(progress.unlocked, level + 1);
+    const entry = { score: sc.total, level, time: seconds, stars, date: Date.now() };
+    progress.top.push(entry);
+    progress.top.sort((a, b) => b.score - a.score);
+    progress.top = progress.top.slice(0, 10);
+    const rank = progress.top.indexOf(entry);
+    if (prev && sc.total > prev.score) flags += '<div class="flag">🎉 New best for this level!</div>';
+    if (rank >= 0 && rank < 3 && progress.top.length > 1) flags += `<div class="flag">🏆 #${rank + 1} on your high-score table</div>`;
+    const done = Object.keys(progress.best).map(Number);
+    unlock('first');
+    if (progress.failed[level]) { unlock('comeback'); delete progress.failed[level]; }
+    if (done.includes(10)) unlock('l10');
+    if (done.includes(25)) unlock('l25');
+    if (done.length >= MAX_LEVEL) unlock('l50');
+    if (Object.values(progress.best).filter(b => b.stars === 3).length >= 10) unlock('stars10');
+  }
 
-  // badges
-  const done = Object.keys(progress.best).map(Number);
-  unlock('first');
+  // badges for both modes
+  progress.streak = lost ? 0 : (progress.streak || 0) + 1;
   if (seconds < 60) unlock('speedy');
   if (seconds < 30) unlock('zoomies');
   if (everX.size === 0) unlock('clean');
-  if (hearts === MAX_HEARTS) unlock('flawless');
-  if (hearts === 1) unlock('close');
-  if (level >= 15 && !hintsUsed && hearts === MAX_HEARTS) unlock('nose');
+  if (!lost) unlock('flawless');
+  if (r.hearts === 1) unlock('close');
+  if (scoreLevel() >= 15 && !hintsUsed && !lost) unlock('nose');
   if (stars === 3 && everX.size === 0 && seconds <= sc.par) unlock('perfect');
   if (progress.streak >= 5) unlock('streak');
-  if (progress.failed[level]) { unlock('comeback'); delete progress.failed[level]; }
-  if (done.includes(10)) unlock('l10');
-  if (done.includes(25)) unlock('l25');
-  if (done.length >= MAX_LEVEL) unlock('l50');
-  if (Object.values(progress.best).filter(b => b.stars === 3).length >= 10) unlock('stars10');
   if (sc.total >= 2000) unlock('roller');
   if (new Date().getHours() < 5) unlock('night');
   save();
@@ -1381,46 +1437,60 @@ function win() {
   setTimeout(() => sfx.win(), 250);
   confetti();
   setTimeout(() => {
-    const row = (label, val, cls = '') => `<span class="${cls}">${label}</span><span class="${cls}">${val}</span>`;
-    const sign = v => (v < 0 ? '−' : '+') + fmtNum(Math.abs(v));
     openModal(`
       <svg class="big" viewBox="0 0 120 70"><use href="#dachs"/></svg>
       <div class="stars">${[0, 1, 2].map(k => `<span class="${k < stars ? '' : 'dim'}">⭐</span>`).join('')}</div>
       <h2>${pick(['Pawsome!', 'Good dogs!', 'Wiener winner!', 'Tail-wagging work!'])}</h2>
-      <p class="sub">Level ${level} solved in ${fmtTime(seconds)}</p>
+      <p class="sub">${endless ? `Endless puzzle ${run.k}` : `Level ${level}`} solved in ${fmtTime(seconds)}</p>
       <div class="breakdown">
-        ${row(`Level ${level}`, sign(sc.base))}
-        ${row(`Speed (par ${fmtTime(sc.par)})`, sign(sc.speed))}
-        ${row(everX.size ? `Tidy paws (${everX.size} ✕)` : 'No ✕s at all! 🧼', sign(sc.tidy))}
-        ${row(`Hearts left (${hearts})`, sign(sc.heartsPts))}
-        ${hintsUsed ? row(`Hints (${hintsUsed})`, sign(sc.hintPts), 'neg') : ''}
-        ${row('Score', fmtNum(sc.total), 'tot')}
+        ${scoreRow(endless ? `${TIERS[P.tierIdx].name} puzzle` : `Level ${level}`, signed(sc.base))}
+        ${scoreRow(`Speed (par ${fmtTime(sc.par)})`, signed(sc.speed))}
+        ${scoreRow(everX.size ? `Tidy paws (${everX.size} ✕)` : 'No ✕s at all! 🧼', signed(sc.tidy))}
+        ${scoreRow(`Hearts left (${r.hearts})`, signed(sc.heartsPts))}
+        ${hintsUsed ? scoreRow(`Hints (${hintsUsed})`, signed(sc.hintPts), 'neg') : ''}
+        ${scoreRow('Score', fmtNum(sc.total), 'tot')}
       </div>
-      ${newBest && prev ? '<div class="flag">🎉 New best for this level!</div>' : ''}
-      ${rank >= 0 && rank < 3 && progress.top.length > 1 ? `<div class="flag">🏆 #${rank + 1} on your high-score table</div>` : ''}
+      ${flags}
       <div class="row">
-        ${level < MAX_LEVEL ? '<button class="btn primary" data-act="next">Next level ▶</button>' : '<button class="btn primary" data-act="levels">🗺️ Levels</button>'}
-        <button class="btn" data-act="replay">↻ Replay</button>
+        ${endless ? '<button class="btn primary" data-act="next">Next puzzle ▶</button><button class="btn" data-act="levels">🗺️ Levels</button>'
+          : (level < MAX_LEVEL ? '<button class="btn primary" data-act="next">Next level ▶</button>' : '<button class="btn primary" data-act="levels">🗺️ Levels</button>') +
+            '<button class="btn" data-act="replay">↻ Replay</button>'}
       </div>`);
   }, 1100);
 }
 
 function lose() {
   over = true; stopTimer(); clearHint();
-  progress.failed[level] = true;
   progress.streak = 0;
+  if (play === 'endless') {
+    const entry = { solved: run.solved, score: run.score, date: Date.now() };
+    progress.runs = (progress.runs || []).concat(entry).sort((a, b) => b.score - a.score).slice(0, 5);
+    const best = progress.runs[0] === entry && progress.runs.length > 1;
+    endlessSnap = null;
+    save();
+    setTimeout(() => sfx.lose(), 500);
+    setTimeout(() => openModal(`
+      <svg class="big" viewBox="0 0 120 70"><use href="#dachs"/></svg>
+      <h2>Run over!</h2>
+      <p class="sub">You solved <b>${run.solved}</b> puzzle${run.solved === 1 ? '' : 's'} for <b>${fmtNum(run.score)}</b> points.</p>
+      ${best ? '<div class="flag">🏆 Your best Endless run!</div>' : ''}
+      <div class="row">
+        <button class="btn primary" data-act="newrun">♾️ New run</button>
+        <button class="btn" data-act="levels">🗺️ Levels</button>
+      </div>`, 'sad'), 900);
+    return;
+  }
+  progress.failed[level] = true;
   save();
   setTimeout(() => sfx.lose(), 500);
-  setTimeout(() => {
-    openModal(`
-      <svg class="big" viewBox="0 0 120 70"><use href="#dachs"/></svg>
-      <h2>Ruh-roh!</h2>
-      <p class="sub">Out of hearts on level ${level}. The pups are still waiting for their spots.</p>
-      <div class="row">
-        <button class="btn primary" data-act="replay">↻ Try again</button>
-        <button class="btn" data-act="levels">🗺️ Levels</button>
-      </div>`, 'sad');
-  }, 900);
+  setTimeout(() => openModal(`
+    <svg class="big" viewBox="0 0 120 70"><use href="#dachs"/></svg>
+    <h2>Ruh-roh!</h2>
+    <p class="sub">Out of hearts on level ${level}. The pups are still waiting for their spots.</p>
+    <div class="row">
+      <button class="btn primary" data-act="replay">↻ Try again</button>
+      <button class="btn" data-act="levels">🗺️ Levels</button>
+    </div>`, 'sad'), 900);
 }
 
 function confetti() {
@@ -1439,6 +1509,99 @@ function confetti() {
 }
 
 // =====================================================================
+//  ENDLESS PUZZLES: generated in a background worker (so the page never
+//  freezes), with the next puzzle prepared while you play the current one
+// =====================================================================
+const GEN_SRC = (() => {
+  const s = document.currentScript ? document.currentScript.textContent : '';
+  const a = s.indexOf('/*GEN-' + 'START*/'), b = s.indexOf('/*GEN-' + 'END*/');
+  return a >= 0 && b > a ? s.slice(a, b) : '';
+})();
+let genWorker = null, workerOk = false, jobId = 0;
+const jobs = new Map();
+// If the worker can't run (some browsers / file:// setups fail silently), finish every job on the page.
+function abandonWorker() {
+  if (genWorker) { try { genWorker.terminate(); } catch (e) { /* ignore */ } }
+  genWorker = false;
+  for (const [id, j] of jobs) { jobs.delete(id); clearTimeout(j.timer); j.resolve(generateRandom(j.tierIdx, j.seed)); }
+}
+function getWorker() {
+  if (genWorker !== null) return genWorker;
+  genWorker = false;
+  if (!GEN_SRC || !window.Worker || !window.Blob) return genWorker;
+  try {
+    const code = GEN_SRC + '\nonmessage = e => postMessage(e.data.ping ? { pong: 1 } : { id: e.data.id, p: generateRandom(e.data.tierIdx, e.data.seed) });';
+    const w = new Worker(URL.createObjectURL(new Blob([code], { type: 'text/javascript' })));
+    w.onmessage = e => {
+      if (e.data.pong) { workerOk = true; return; }
+      const j = jobs.get(e.data.id);
+      if (j) { jobs.delete(e.data.id); clearTimeout(j.timer); j.resolve(e.data.p); }
+    };
+    w.onerror = e => { if (e.preventDefault) e.preventDefault(); abandonWorker(); };
+    w.postMessage({ ping: 1 });
+    setTimeout(() => { if (!workerOk && genWorker === w) abandonWorker(); }, 2000); // no answer: give up on it
+    genWorker = w;
+  } catch (e) { genWorker = false; }
+  return genWorker;
+}
+function requestPuzzle(tierIdx) {
+  const seed = 1 + Math.floor(Math.random() * 2147483646);
+  return new Promise(resolve => {
+    const w = getWorker();
+    if (!w) { setTimeout(() => resolve(generateRandom(tierIdx, seed)), 30); return; }
+    const id = ++jobId;
+    // watchdog: a healthy worker answers in well under this; otherwise generate on the page
+    const timer = setTimeout(() => { if (jobs.has(id)) abandonWorker(); }, 15000);
+    jobs.set(id, { resolve, tierIdx, seed, timer });
+    w.postMessage({ id, tierIdx, seed });
+  });
+}
+let prefetched = null; // { tierIdx, promise }
+function prefetchNext() {
+  if (!run) return;
+  const t = endlessTierIdx(run.k + 1);
+  if (!prefetched || prefetched.tierIdx !== t) prefetched = { tierIdx: t, promise: requestPuzzle(t) };
+}
+function takePuzzle(tierIdx) {
+  if (prefetched && prefetched.tierIdx === tierIdx) { const p = prefetched.promise; prefetched = null; return p; }
+  return requestPuzzle(tierIdx);
+}
+
+let loadingT = null, loadingBusy = false;
+function showLoading(on) {
+  clearTimeout(loadingT);
+  if (on) loadingT = setTimeout(() => $('loading').classList.add('show'), 150); // no flash if it's instant
+  else $('loading').classList.remove('show');
+}
+
+async function nextEndless(fresh) {
+  if (loadingBusy) return;
+  closeModal();
+  if (fresh || !run) run = { k: 0, solved: 0, score: 0, hearts: MAX_HEARTS };
+  run.k++;
+  loadingBusy = true; showLoading(true);
+  const p = await takePuzzle(endlessTierIdx(run.k));
+  showLoading(false); loadingBusy = false;
+  play = 'endless';
+  setPuzzle(p);
+  resetBoard(run.hearts);
+  run.heartsStart = hearts;
+  buildBoard(); drawHearts(); drawStatus(); save();
+  prefetchNext();
+}
+
+function startEndless() {
+  closeModal();
+  if (play === 'endless' && !over) return;                      // already mid-run
+  if (play === 'endless' && hearts > 0) { nextEndless(false); return; } // between puzzles
+  const snap = endlessSnap;
+  endlessSnap = null;
+  if (snap && snap.over) { run = snap.run; nextEndless(false); return; }
+  if (snap) { restore(snap); prefetchNext(); save(); return; }
+  nextEndless(true);
+}
+
+// =====================================================================
 //  MODALS: levels, scores, badges
 // =====================================================================
 function openModal(html, cls = '') {
@@ -1450,13 +1613,21 @@ function openModal(html, cls = '') {
 function closeModal() { $('overlay').classList.remove('show'); }
 
 function showLevels() {
-  let html = '<button class="close" data-act="close" aria-label="Close">✕</button><h2>Levels</h2><div class="lv-grid">';
+  const runs = progress.runs || [];
+  const snapRun = endlessSnap && endlessSnap.run;
+  const sub = play === 'endless' && hearts > 0 ? `Continue run · puzzle ${run.k}`
+    : snapRun ? `Resume run · puzzle ${snapRun.k} · ${fmtNum(snapRun.score)} pts`
+    : runs.length ? `Best run: ${runs[0].solved} solved · ${fmtNum(runs[0].score)} pts`
+    : 'Random puzzles that keep getting harder';
+  let html = `<button class="close" data-act="close" aria-label="Close">✕</button><h2>Levels</h2>
+    <button class="btn primary endless" data-act="endless"><span>♾️ Endless mode</span><small>${sub}</small></button>
+    <div class="lv-grid">`;
   for (const t of TIERS) {
     html += `<div class="tier-h">${t.name}</div>`;
     for (let n = t.from; n <= t.to; n++) {
       const b = progress.best[n], locked = n > progress.unlocked;
       const st = b ? '★'.repeat(b.stars) + '☆'.repeat(3 - b.stars) : '';
-      html += `<button class="lv${b ? ' done' : ''}${n === level ? ' cur' : ''}" data-lv="${n}" ${locked ? 'disabled aria-label="Locked"' : ''}>${locked ? '🔒' : n}<small>${st}</small></button>`;
+      html += `<button class="lv${b ? ' done' : ''}${play === 'level' && n === level ? ' cur' : ''}" data-lv="${n}" ${locked ? 'disabled aria-label="Locked"' : ''}>${locked ? '🔒' : n}<small>${st}</small></button>`;
     }
   }
   openModal(html + '</div>');
@@ -1467,6 +1638,7 @@ function showScores() {
   const total = best.reduce((a, b) => a + b.score, 0);
   const starSum = best.reduce((a, b) => a + b.stars, 0);
   const rows = progress.top.map((e, k) => `<tr><td>${k + 1}</td><td>Lv ${e.level}</td><td><b>${fmtNum(e.score)}</b></td><td>${fmtTime(e.time)}</td><td>${'★'.repeat(e.stars)}</td></tr>`).join('');
+  const runs = (progress.runs || []).map((e, k) => `<tr><td>${k + 1}</td><td>${e.solved}</td><td><b>${fmtNum(e.score)}</b></td><td>${new Date(e.date).toLocaleDateString()}</td></tr>`).join('');
   openModal(`
     <button class="close" data-act="close" aria-label="Close">✕</button>
     <h2>🏆 High scores</h2>
@@ -1478,6 +1650,9 @@ function showScores() {
     ${rows ? `<table class="scores"><tr><th>#</th><th>Level</th><th>Score</th><th>Time</th><th>Stars</th></tr>${rows}</table>`
       : '<p class="sub">No scores yet. Solve a level to get on the board!</p>'}
     <p class="sub" style="margin:10px 0 0;font-size:12.5px">Total score adds up your best score on each level.</p>
+    <h3 class="sec">♾️ Best Endless runs</h3>
+    ${runs ? `<table class="scores"><tr><th>#</th><th>Solved</th><th>Score</th><th>Date</th></tr>${runs}</table>`
+      : '<p class="sub" style="margin-top:6px">No finished runs yet.</p>'}
     <button class="linkbtn" data-act="reset">Reset all progress</button>`);
 }
 
@@ -1495,11 +1670,14 @@ $('overlay').addEventListener('click', e => {
   if (!act) return;
   const a = act.dataset.act;
   if (a === 'close') closeModal();
-  if (a === 'next') { closeModal(); startLevel(level + 1); }
+  if (a === 'next') { if (play === 'endless') nextEndless(false); else { closeModal(); startLevel(level + 1); } }
   if (a === 'replay') { closeModal(); startLevel(level); }
   if (a === 'levels') showLevels();
-  if (a === 'reset' && window.confirm('Reset all levels, scores and badges? This cannot be undone.')) {
-    progress = { unlocked: 1, current: 1, best: {}, top: [], ach: {}, hintsTotal: 0, streak: 0, failed: {} };
+  if (a === 'endless') startEndless();
+  if (a === 'newrun') nextEndless(true);
+  if (a === 'reset' && window.confirm('Reset all levels, scores, Endless runs and badges? This cannot be undone.')) {
+    progress = freshProgress();
+    endlessSnap = null; play = 'level'; run = null;
     closeModal(); startLevel(1);
   }
 });
@@ -1507,22 +1685,40 @@ $('overlay').addEventListener('click', e => {
 // =====================================================================
 //  LIFECYCLE
 // =====================================================================
-function loadLevel(n) {
-  level = n;
-  P = levelPuzzle(n);
+function setPuzzle(p) {
+  P = p;
   peers = buildPeers(P.regions);
   solSet = new Set(P.solution.map((c, r) => r * 8 + c));
 }
 
-function startLevel(n) {
-  n = Math.max(1, Math.min(MAX_LEVEL, n));
-  loadLevel(n);
-  progress.current = n;
-  marks = new Uint8Array(64); hearts = MAX_HEARTS; seconds = 0; over = false; hintsUsed = 0;
+function resetBoard(h) {
+  marks = new Uint8Array(64); hearts = h; seconds = 0; over = false; hintsUsed = 0;
   everX = new Set(); luckyCells = new Set(); undoStack = []; cursor = -1; hint = null;
   stopTimer();
   $('hintbox').hidden = true;
+}
+
+function startLevel(n) {
+  if (play === 'endless' && hearts > 0) endlessSnap = snapshot(); // pause the run so it can be resumed
+  play = 'level'; run = null;
+  n = Math.max(1, Math.min(MAX_LEVEL, n));
+  level = n;
+  setPuzzle(levelPuzzle(n));
+  progress.current = n;
+  resetBoard(MAX_HEARTS);
   buildBoard(); drawHearts(); drawStatus(); save();
+}
+
+function restore(g) {
+  play = g.play === 'endless' ? 'endless' : 'level';
+  run = g.run || null;
+  if (play === 'endless') setPuzzle(g.P);
+  else { level = g.level; setPuzzle(levelPuzzle(g.level)); }
+  resetBoard(g.hearts);
+  marks = Uint8Array.from(g.marks); seconds = g.seconds || 0; over = !!g.over; hintsUsed = g.hintsUsed || 0;
+  everX = new Set(g.everX || []); luckyCells = new Set(g.lucky || []);
+  buildBoard(); drawHearts(); drawStatus();
+  if (seconds > 0 && !over) startTimer();
 }
 
 function setMode(m) {
@@ -1567,19 +1763,22 @@ document.addEventListener('visibilitychange', save);
   }
   if (saved) {
     if (saved.settings) settings = Object.assign(settings, saved.settings);
-    if (saved.progress) progress = Object.assign(progress, saved.progress);
+    if (saved.progress) progress = Object.assign(freshProgress(), saved.progress);
+    endlessSnap = saved.endlessSnap || null;
   }
   drawSettings(); setMode(settings.mode);
 
   const g = saved && saved.game;
-  if (g && g.level >= 1 && g.level <= MAX_LEVEL) {
-    loadLevel(g.level);
-    marks = Uint8Array.from(g.marks); hearts = g.hearts; seconds = g.seconds || 0; over = !!g.over; hintsUsed = g.hintsUsed || 0;
-    everX = new Set(g.everX || []); luckyCells = new Set(g.lucky || []);
-    undoStack = [];
-    buildBoard(); drawHearts(); drawStatus();
-    if (seconds > 0 && !over) startTimer();
-    if (over) startLevel(hearts > 0 && dogCount() === 8 ? Math.min(MAX_LEVEL, level + 1) : level);
+  const valid = g && (g.play === 'endless' ? g.P && g.run : g.level >= 1 && g.level <= MAX_LEVEL);
+  if (valid) {
+    restore(g);
+    if (!over) { if (play === 'endless') prefetchNext(); return; }
+    if (play === 'endless') {
+      if (hearts > 0) nextEndless(false);
+      else { play = 'level'; run = null; startLevel(progress.current || 1); }
+    } else {
+      startLevel(hearts > 0 && dogCount() === 8 ? Math.min(MAX_LEVEL, level + 1) : level);
+    }
     return;
   }
   $('howto').open = true;

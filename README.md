@@ -16,7 +16,8 @@ A cute logic puzzle (Queens / "Meowdoku" style), but with dachshunds. The game i
 - Every level has exactly one solution, and you can reach it by logic alone. The opening move is always findable.
 - **Hints** work from your current board. They show the next logical step on the grid (the area involved, the squares it blocks, a "ghost" dog for what-if reasoning) and explain why it works.
 - **Scoring:** level bonus + speed (vs. par) + tidiness (fewer ✕ marks; none at all is a big bonus) + hearts left − hints. 1–3 stars per level, and a local high-score table.
-- **19 badges**, e.g. Speedy Sausage (under a minute), Clean Paws (no ✕s), Lucky Guess, Hot Dog Streak, Night Owl.
+- **Endless mode:** freshly generated random puzzles that ramp up from Easy to Expert. Hearts carry over between puzzles, a flawless solve wins one back, and the run ends when you're out of hearts. Puzzles are generated in a background Web Worker, and the next one is prepared while you play. Your best runs go on the high-score table.
+- **21 badges**, e.g. Speedy Sausage (under a minute), Clean Paws (no ✕s), Lucky Guess, Hot Dog Streak, Off the Leash (5 Endless puzzles in one run).
 
 Progress is saved in the browser (localStorage).
 
