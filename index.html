@@ -768,7 +768,7 @@ let P = null, peers = null, solSet = null;
 let marks = new Uint8Array(64); // 0 empty, 1 X, 2 dog
 let hearts = MAX_HEARTS, history = [], seconds = 0, timerId = null, started = false, over = false, hintsUsed = 0;
 let cursor = -1, hintCells = [], lastTap = { i: -1, t: 0 };
-let settings = { sound: true, autoX: true, diff: 'medium', mode: 'x' };
+let settings = { sound: true, autoX: false, diff: 'medium', mode: 'x', v: 2 };
 let stats = { wins: 0, best: {} };
 
 const store = {
@@ -1157,7 +1157,11 @@ document.addEventListener('keydown', e => {
 (function boot() {
   const saved = store.get(SAVE_KEY);
   if (saved) {
-    if (saved.settings) settings = Object.assign(settings, saved.settings);
+    if (saved.settings) {
+      // v1 saved Auto-✕ as on by default; it's now off unless the player opts in
+      if (!saved.settings.v) { saved.settings.autoX = false; saved.settings.v = 2; }
+      settings = Object.assign(settings, saved.settings);
+    }
     if (saved.stats) stats = Object.assign(stats, saved.stats);
   }
   drawSettings(); setMode(settings.mode);
