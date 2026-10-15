@@ -473,8 +473,11 @@ function combos(n, k, fn, start = 0, acc = []) {
  *   level 4: three confined to three (triples)
  * All deductions are sound, so if it places all 8 dogs the solution is UNIQUE and guess-free.
  */
-function logicSolve(reg, given = [], maxTech = 4, known = []) {
+// explain = true (used by hints) prefers explanations in terms of territories/colours,
+// and picks the simplest "what if" step; grading always uses the default order.
+function logicSolve(reg, given = [], maxTech = 4, known = [], explain = false) {
   const peers = buildPeers(reg);
+  const TORDER = explain ? [2, 0, 1] : [0, 1, 2];
   const st = new Uint8Array(64).fill(1); // 1 = open, 0 = ruled out, 2 = dog
   for (const x of known) st[x] = 0;      // squares the player has already crossed out
   const idx = [i => i >> 3, i => i & 7, i => reg[i]];
@@ -493,7 +496,7 @@ function logicSolve(reg, given = [], maxTech = 4, known = []) {
   // Each technique makes ONE deduction and records it, so the solver always
   // takes the easiest step available (this is also what hints explain).
   function singles() {
-    for (let t = 0; t < 3; t++) for (let u = 0; u < N; u++) {
+    for (const t of TORDER) for (let u = 0; u < N; u++) {
       const c = open(units[t][u]);
       if (c === null) continue;
       if (c.length === 0) return -1;
@@ -503,7 +506,7 @@ function logicSolve(reg, given = [], maxTech = 4, known = []) {
   }
 
   function confinement(k, tech) {
-    for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) {
+    for (const a of TORDER) for (const b of TORDER) {
       if (a === b) continue;
       const opens = [];
       for (let u = 0; u < N; u++) { const c = open(units[a][u]); if (c && c.length) opens.push([u, c]); }
@@ -526,16 +529,24 @@ function logicSolve(reg, given = [], maxTech = 4, known = []) {
 
   function lookahead() {
     const hit = new Uint8Array(64);
+    let best = null;
     for (let i = 0; i < 64; i++) {
       if (st[i] !== 1) continue;
       hit.fill(0);
       for (const p of peers[i]) hit[p] = 1;
-      for (let t = 0; t < 3; t++) for (let u = 0; u < N; u++) {
+      for (const t of TORDER) for (let u = 0; u < N; u++) {
         const c = open(units[t][u]);
         if (!c || c.includes(i)) continue;
-        if (c.every(x => hit[x])) { st[i] = 0; steps.push({ tech: 2, elim: [i], t, u, victims: c }); return true; }
+        if (!c.every(x => hit[x])) continue;
+        const cand = { tech: 2, elim: [i], t, u, victims: c };
+        if (!explain) { st[i] = 0; steps.push(cand); return true; }
+        // simplest to explain: a territory, few squares, all blocked for the same reason
+        const why = new Set(c.map(x => NEIGH[i].includes(x) ? 'touch' : x >> 3 === i >> 3 ? 'row' : (x & 7) === (i & 7) ? 'col' : 'terr'));
+        cand.score = (t === 2 ? 0 : 4) + c.length + (why.size - 1) * 2;
+        if (!best || cand.score < best.score) best = cand;
       }
     }
+    if (best) { st[best.elim[0]] = 0; steps.push(best); return true; }
     return false;
   }
 
@@ -1169,6 +1180,18 @@ function unitCells(t, u) {
   return out;
 }
 const SW = { reason: '<span class="sw reason"></span>', blocked: '<span class="sw blocked"></span>', target: '<span class="sw target"></span>' };
+const colourOf = i => COLOR_NAMES[P.colors[P.regions[i]]];
+
+// Why a dog on square g rules out square v, in plain words.
+const REL = { touch: ['touches it', 'touch it'], row: ['is in its row', 'are in its row'], col: ['is in its column', 'are in its column'], terr: ['is in its territory', 'are in its territory'] };
+const relation = (g, v) => NEIGH[g].includes(v) ? 'touch' : g >> 3 === v >> 3 ? 'row' : (g & 7) === (v & 7) ? 'col' : 'terr';
+function blockPhrase(g, victims) {
+  const groups = {};
+  for (const v of victims) { const r = relation(g, v); groups[r] = (groups[r] || 0) + 1; }
+  const keys = Object.keys(groups), n = victims.length;
+  if (keys.length === 1) return n === 1 ? `it ${REL[keys[0]][0]}` : `${n === 2 ? 'both' : `all ${n}`} ${REL[keys[0]][1]}`;
+  return keys.map(r => `${groups[r] === 1 ? 'one' : groups[r]} ${REL[r][groups[r] === 1 ? 0 : 1]}`).join(' and ');
+}
 
 function buildHint(s) {
   const H = { target: new Set(), reason: new Set(), blocked: new Set(), ghost: -1 };
@@ -1177,15 +1200,22 @@ function buildHint(s) {
     H.target.add(s.place);
     s.unit.forEach(c => H.reason.add(c));
     const U = unitName(s.t, s.u);
-    text = `<b>${cap(U)}</b> ${SW.reason} has only <b>one free square</b> left. Every other square in it is crossed out or blocked by a dog. So its dog goes on the circled square ${SW.target}. Double-tap it!`;
+    text = `<b>${cap(U)}</b> ${SW.reason} has only <b>one free square</b> left${s.t === 2 ? '' : ` (a ${colourOf(s.place)} square)`}. ` +
+      `Every other square in it is crossed out or blocked by a dog. So its dog goes on the circled square ${SW.target}. Double-tap it!`;
   } else if (s.tech === 2) {
-    const i = s.elim[0];
-    H.target.add(i); H.ghost = i;
+    const g = s.elim[0], n = s.victims.length;
+    H.target.add(g); H.ghost = g;
     unitCells(s.t, s.u).forEach(c => H.reason.add(c));
     s.victims.forEach(c => H.blocked.add(c));
-    const U = unitName(s.t, s.u), n = s.victims.length;
-    text = `Imagine a dog on the circled square ${SW.target}. <b>${cap(U)}</b> ${SW.reason} has ${n === 1 ? 'one free square' : `${n} free squares`} ${SW.blocked}, ` +
-      `and that dog would block ${n === 1 ? 'it' : 'all of them'} (same row, column or territory, or touching). ${cap(U)} would have nowhere left for its dog, so the circled square can't be a dog. Mark it ✕.`;
+    const U = unitName(s.t, s.u);
+    const cols = [...new Set(s.victims.map(colourOf))];
+    const colNote = s.t !== 2 && cols.length === 1 ? ` (${n === 1 ? `it's ${cols[0]}` : `${n === 2 ? 'both' : 'all'} ${cols[0]}`})` : '';
+    const rels = new Set(s.victims.map(v => relation(g, v)));
+    const rule = rels.size === 1 && rels.has('touch') ? 'Dogs can\'t touch, not even diagonally'
+      : 'A dog rules out its own row, column and territory, and every square touching it';
+    text = `Imagine a dog on the circled <b>${colourOf(g)}</b> square ${SW.target}. ` +
+      `<b>${cap(U)}</b> ${SW.reason} has only ${n === 1 ? 'one free square' : `${n} free squares`} left ${SW.blocked}${colNote}, and ${blockPhrase(g, s.victims)}. ` +
+      `${rule}, so ${U} would have nowhere left for its dog. That means the circled square can't hold a dog: mark it ✕.`;
   } else {
     s.aCells.forEach(c => H.reason.add(c));
     s.elim.forEach(c => H.target.add(c));
@@ -1210,7 +1240,7 @@ function showHint() {
     const dogs = [...solSet].filter(i => marks[i] === 2);
     const xs = [];
     for (let i = 0; i < 64; i++) if (marks[i] === 1) xs.push(i);
-    const s = logicSolve(P.regions, dogs, 4, xs).steps[0];
+    const s = logicSolve(P.regions, dogs, 4, xs, true).steps[0];
     if (s) ({ H, text } = buildHint(s));
     else {
       const i = [...solSet].find(j => marks[j] !== 2);
