@@ -330,6 +330,8 @@
       <li><b>Double-tap / right-click</b> places a dog. (You can also switch the tap mode to “Dog”.)</li>
       <li>Placing a dog in the wrong spot costs a <b>❤</b>. Lose all 3 and the game ends.</li>
       <li>Every puzzle has exactly <b>one solution</b>, and you can always reach it by logic. You never need to guess.</li>
+      <li>Stuck? <b>🦴 Hint</b> highlights the next logical step and explains why it works.</li>
+      <li>Tip: look for small territories, or territories that fit in just one row or column.</li>
       <li>Keyboard: arrow keys move, <kbd>X</kbd>/<kbd>Space</kbd> marks, <kbd>D</kbd>/<kbd>Enter</kbd> places a dog, <kbd>Z</kbd> undoes.</li>
     </ul>
   </details>
@@ -408,17 +410,36 @@ function genSolution(rng) {
   return sol.slice();
 }
 
+// Size limits per territory. Small territories give players a foothold:
+// easy puzzles get 1-square territories (an instant first dog), all levels get some small ones.
+const MAX_REGION = 13; // keeps big territories compact rather than snaking across the board
+function pickCaps(diff, rng) {
+  const caps = new Array(N).fill(MAX_REGION);
+  const order = shuffle([0, 1, 2, 3, 4, 5, 6, 7], rng);
+  const ri = (a, b) => a + Math.floor(rng() * (b - a + 1));
+  let k = 0;
+  const [ones, smalls, lo, hi] = diff === 'easy' ? [ri(1, 2), ri(1, 2), 2, 4]
+    : diff === 'medium' ? [0, ri(2, 3), 2, 5]
+    : [0, ri(1, 2), 3, 5];
+  for (let j = 0; j < ones; j++) caps[order[k++]] = 1;
+  for (let j = 0; j < smalls; j++) caps[order[k++]] = ri(lo, hi);
+  return caps;
+}
+
 // Grow 8 contiguous territories, each seeded on one solution dog.
-function genRegions(sol, rng) {
+function genRegions(sol, rng, caps) {
   const reg = new Int8Array(64).fill(-1), cells = [];
   for (let r = 0; r < N; r++) { reg[r * 8 + sol[r]] = r; cells.push([r * 8 + sol[r]]); }
   let left = 64 - N;
   while (left > 0) {
-    const fronts = [];
-    for (let k = 0; k < N; k++) {
-      const f = [];
-      for (const i of cells[k]) for (const j of ORTH[i]) if (reg[j] === -1) f.push(j);
-      if (f.length) fronts.push([k, f]);
+    let fronts = [];
+    for (let pass = 0; pass < 2 && !fronts.length; pass++) { // 2nd pass ignores caps if a pocket is boxed in
+      for (let k = 0; k < N; k++) {
+        if (pass === 0 && cells[k].length >= caps[k]) continue;
+        const f = [];
+        for (const i of cells[k]) for (const j of ORTH[i]) if (reg[j] === -1) f.push(j);
+        if (f.length) fronts.push([k, f]);
+      }
     }
     let pick;
     if (rng() < 0.7) { // tournament: favour the smaller region -> balanced, blobby shapes
@@ -446,9 +467,16 @@ function buildPeers(reg) {
   return P;
 }
 
+// Calls fn on each k-combination of 0..n-1; stops early if fn returns true.
 function combos(n, k, fn, start = 0, acc = []) {
-  if (acc.length === k) { fn(acc); return; }
-  for (let i = start; i < n; i++) { acc.push(i); combos(n, k, fn, i + 1, acc); acc.pop(); }
+  if (acc.length === k) return fn(acc);
+  for (let i = start; i < n; i++) {
+    acc.push(i);
+    const stop = combos(n, k, fn, i + 1, acc);
+    acc.pop();
+    if (stop) return true;
+  }
+  return false;
 }
 
 /*
@@ -469,71 +497,73 @@ function logicSolve(reg, given = [], maxTech = 4) {
   for (let i = 0; i < 64; i++) for (let t = 0; t < 3; t++) units[t][idx[t](i)].push(i);
 
   let placed = 0, maxUsed = 0;
-  const order = [];
+  const order = [], steps = [];
   const place = i => { st[i] = 2; placed++; order.push(i); for (const p of peers[i]) if (st[p] === 1) st[p] = 0; };
   const open = u => { const c = []; for (const i of u) { if (st[i] === 2) return null; if (st[i] === 1) c.push(i); } return c; };
 
   for (const g of given) place(g);
   order.length = 0;
 
+  // Each technique makes ONE deduction and records it, so the solver always
+  // takes the easiest step available (this is also what hints explain).
   function singles() {
-    let p = false;
-    for (let t = 0; t < 3; t++) for (const u of units[t]) {
-      const c = open(u);
+    for (let t = 0; t < 3; t++) for (let u = 0; u < N; u++) {
+      const c = open(units[t][u]);
       if (c === null) continue;
       if (c.length === 0) return -1;
-      if (c.length === 1) { place(c[0]); p = true; }
+      if (c.length === 1) { place(c[0]); steps.push({ tech: 0, place: c[0], t, u }); return 1; }
     }
-    return p ? 1 : 0;
+    return 0;
   }
 
-  function confinement(k) {
-    let changed = false;
+  function confinement(k, tech) {
     for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) {
       if (a === b) continue;
       const opens = [];
       for (let u = 0; u < N; u++) { const c = open(units[a][u]); if (c && c.length) opens.push([u, c]); }
       if (opens.length <= k) continue;
-      combos(opens.length, k, sel => {
+      const hit = combos(opens.length, k, sel => {
         const bset = new Set(), aset = new Set();
         for (const s of sel) { aset.add(opens[s][0]); for (const c of opens[s][1]) bset.add(idx[b](c)); }
-        if (bset.size !== k) return;
-        for (const bi of bset) for (const c of units[b][bi]) {
-          if (st[c] === 1 && !aset.has(idx[a](c))) { st[c] = 0; changed = true; }
-        }
+        if (bset.size !== k) return false;
+        const elim = [];
+        for (const bi of bset) for (const c of units[b][bi]) if (st[c] === 1 && !aset.has(idx[a](c))) elim.push(c);
+        if (!elim.length) return false;
+        for (const c of elim) st[c] = 0;
+        steps.push({ tech, elim, a, aUnits: [...aset], b, bUnits: [...bset] });
+        return true;
       });
+      if (hit) return true;
     }
-    return changed;
+    return false;
   }
 
   function lookahead() {
-    let changed = false;
     const hit = new Uint8Array(64);
     for (let i = 0; i < 64; i++) {
       if (st[i] !== 1) continue;
       hit.fill(0);
       for (const p of peers[i]) hit[p] = 1;
-      outer:
-      for (let t = 0; t < 3; t++) for (const u of units[t]) {
-        const c = open(u);
+      for (let t = 0; t < 3; t++) for (let u = 0; u < N; u++) {
+        const c = open(units[t][u]);
         if (!c || c.includes(i)) continue;
-        if (c.every(x => hit[x])) { st[i] = 0; changed = true; break outer; }
+        if (c.every(x => hit[x])) { st[i] = 0; steps.push({ tech: 2, elim: [i], t, u }); return true; }
       }
     }
-    return changed;
+    return false;
   }
 
   while (placed < N) {
     const s = singles();
-    if (s < 0) return { ok: false, maxUsed, order, st };
+    if (s < 0) return { ok: false, maxUsed, order, st, steps };
     if (s > 0) continue;
-    if (maxTech >= 1 && confinement(1)) { maxUsed = Math.max(maxUsed, 1); continue; }
+    if (maxTech >= 1 && confinement(1, 1)) { maxUsed = Math.max(maxUsed, 1); continue; }
     if (maxTech >= 2 && lookahead()) { maxUsed = Math.max(maxUsed, 2); continue; }
-    if (maxTech >= 3 && confinement(2)) { maxUsed = Math.max(maxUsed, 3); continue; }
-    if (maxTech >= 4 && confinement(3)) { maxUsed = Math.max(maxUsed, 4); continue; }
+    if (maxTech >= 3 && confinement(2, 3)) { maxUsed = Math.max(maxUsed, 3); continue; }
+    if (maxTech >= 4 && confinement(3, 4)) { maxUsed = Math.max(maxUsed, 4); continue; }
     break;
   }
-  return { ok: placed === N, maxUsed, order, st };
+  return { ok: placed === N, maxUsed, order, st, steps };
 }
 
 // Brute-force solution counter (used as a second, independent uniqueness guarantee).
@@ -559,11 +589,19 @@ function countSolutions(reg, limit = 2, avoid = null, out = null) {
   return count;
 }
 
+// Grade a solve by (a) the hardest step needed anywhere and (b) the hardest step
+// needed before the FIRST dog can be placed, so every level has a clear way in.
+function gradeSolve(res) {
+  let opening = 0;
+  for (const s of res.steps) { if (s.tech === 0) break; opening = Math.max(opening, s.tech); }
+  return { max: res.maxUsed, opening, instant: res.steps[0].tech === 0 };
+}
 const DIFF_FIT = {
-  easy: lv => lv <= 1,
-  medium: lv => lv === 2 || lv === 3,
-  hard: lv => lv >= 3,
+  easy: g => g.instant && g.max <= 1,          // a 1-square territory to start; never harder than "territory in one line"
+  medium: g => g.opening <= 1 && g.max === 2,  // easy way in; needs "what if" reasoning later
+  hard: g => g.opening <= 2 && g.max >= 3,     // needs pairs/triples, but the opening is still findable
 };
+const DIFF_SALT = { easy: 1, medium: 2, hard: 3 };
 
 // Is territory g still in one piece if cell `skip` is taken away from it?
 function staysConnected(reg, g, skip) {
@@ -580,7 +618,7 @@ function staysConnected(reg, g, skip) {
 
 // Random territories almost never give a unique answer, so nudge border cells
 // between neighbouring territories until every rival solution is broken.
-function refineRegions(sol, reg, rng, maxSteps = 1500) {
+function refineRegions(sol, reg, rng, caps, maxSteps = 1500) {
   const seeds = new Set(sol.map((c, r) => r * 8 + c));
   const size = new Array(N).fill(0);
   for (let i = 0; i < 64; i++) size[reg[i]]++;
@@ -599,6 +637,7 @@ function refineRegions(sol, reg, rng, maxSteps = 1500) {
     const nbrs = ORTH[i].filter(j => reg[j] !== og);
     if (!nbrs.length || size[og] <= 2 || !staysConnected(reg, og, i)) continue;
     const ng = reg[nbrs[Math.floor(rng() * nbrs.length)]];
+    if (size[ng] >= caps[ng]) continue;
     reg[i] = ng;
     const o2 = {}, c2 = countSolutions(reg, 300, sol, o2);
     if (c2 <= cnt || rng() < 0.03) { cnt = c2; out = o2; size[og]--; size[ng]++; }
@@ -608,17 +647,21 @@ function refineRegions(sol, reg, rng, maxSteps = 1500) {
 }
 
 function generatePuzzle(seed, diff) {
-  const rng = mulberry32(seed);
-  let fallback = null;
-  for (let t = 0; t < 400; t++) {
+  const rng = mulberry32(seed * 7 + DIFF_SALT[diff]);
+  // fallback: the most approachable puzzle seen (easiest opening), if no exact fit turns up
+  let fallback = null, fbScore = Infinity;
+  for (let t = 0; t < 600; t++) {
     const sol = genSolution(rng);
-    const reg = genRegions(sol, rng);
-    if (!refineRegions(sol, reg, rng)) continue;
+    const caps = pickCaps(diff, rng);
+    const reg = genRegions(sol, rng, caps);
+    if (!refineRegions(sol, reg, rng, caps)) continue;
     const res = logicSolve(reg, [], 4);
     if (!res.ok || countSolutions(reg) !== 1) continue;
-    const p = { seed, diff, regions: Array.from(reg), solution: sol, level: res.maxUsed, colors: shuffle([0, 1, 2, 3, 4, 5, 6, 7], rng) };
-    if (DIFF_FIT[diff](res.maxUsed)) return p;
-    if (!fallback || Math.abs(res.maxUsed - 2) < Math.abs(fallback.level - 2)) fallback = p;
+    const g = gradeSolve(res);
+    const p = { seed, diff, regions: Array.from(reg), solution: sol, level: g.max, opening: g.opening, colors: shuffle([0, 1, 2, 3, 4, 5, 6, 7], rng) };
+    if (DIFF_FIT[diff](g)) return p;
+    const score = g.opening * 10 + Math.abs(g.max - { easy: 1, medium: 2, hard: 3 }[diff]);
+    if (score < fbScore) { fallback = p; fbScore = score; }
   }
   return fallback || BACKUP;
 }
@@ -712,7 +755,8 @@ const sfx = (() => {
 // =====================================================================
 //  GAME
 // =====================================================================
-const PALETTE = ['#ffb3ba', '#ffd6a5', '#fdf1a0', '#b9f2c8', '#b5dcff', '#d6c6ff', '#ffc6ec', '#a8ece6'];
+const PALETTE = ['#ff9e9e', '#ffd6a5', '#fdf1a0', '#b9f2c8', '#b5dcff', '#d6c6ff', '#ffc6ec', '#a8ece6'];
+const COLOR_NAMES = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink', 'teal'];
 const DIFF_LABEL = { easy: 'Easy', medium: 'Medium', hard: 'Hard' };
 const MAX_HEARTS = 3;
 const SAVE_KEY = 'woofdoku-v1';
@@ -723,7 +767,7 @@ const boardEl = $('board');
 let P = null, peers = null, solSet = null;
 let marks = new Uint8Array(64); // 0 empty, 1 X, 2 dog
 let hearts = MAX_HEARTS, history = [], seconds = 0, timerId = null, started = false, over = false, hintsUsed = 0;
-let cursor = -1, hintCell = -1, lastTap = { i: -1, t: 0 };
+let cursor = -1, hintCells = [], lastTap = { i: -1, t: 0 };
 let settings = { sound: true, autoX: true, diff: 'medium', mode: 'x' };
 let stats = { wins: 0, best: {} };
 
@@ -811,8 +855,8 @@ function stopTimer() { clearInterval(timerId); timerId = null; }
 
 // ---------- Actions ----------
 function clearHint() {
-  if (hintCell >= 0 && cellEls[hintCell]) cellEls[hintCell].classList.remove('hint');
-  hintCell = -1;
+  for (const i of hintCells) if (cellEls[i]) cellEls[i].classList.remove('hint');
+  hintCells = [];
 }
 
 function onTap(i) {
@@ -836,7 +880,11 @@ function onTap(i) {
 
 function toggleX(i) {
   if (marks[i] === 2) return false;
-  clearHint();
+  // marking one of several hinted squares keeps the rest of the hint visible
+  if (hintCells.length > 1 && hintCells.includes(i)) {
+    cellEls[i].classList.remove('hint');
+    hintCells = hintCells.filter(j => j !== i);
+  } else clearHint();
   startTimer();
   const prev = marks[i];
   marks[i] = prev ? 0 : 1;
@@ -895,27 +943,48 @@ function clearBoard() {
   drawStatus(); save();
 }
 
+// ---------- Hints that explain the logic ----------
+const unitName = (t, u) => t === 0 ? `row ${u + 1}` : t === 1 ? `column ${u + 1}` : `the ${COLOR_NAMES[P.colors[u]]} territory`;
+function unitsName(t, us) {
+  if (us.length === 1) return unitName(t, us[0]);
+  const parts = us.map(u => t === 2 ? COLOR_NAMES[P.colors[u]] : u + 1);
+  const joined = parts.slice(0, -1).join(', ') + ' and ' + parts[parts.length - 1];
+  return t === 0 ? `rows ${joined}` : t === 1 ? `columns ${joined}` : `the ${joined} territories`;
+}
+const cap = s => s[0].toUpperCase() + s.slice(1);
+
+function explain(s) {
+  if (s.tech === 0) return `${cap(unitName(s.t, s.u))} has only one free square left, so a dog goes here! 🐶`;
+  if (s.tech === 2) return `If a dog sat here, ${unitName(s.t, s.u)} would have no free squares left. So mark it ✕.`;
+  const A = unitsName(s.a, s.aUnits), B = unitsName(s.b, s.bUnits);
+  if (s.aUnits.length === 1) return `${cap(A)} only has free squares in ${B}, so its dog must be in ${B}. Mark the highlighted squares ✕.`;
+  return `${cap(A)} only have free squares in ${B}. Their ${s.aUnits.length} dogs use up ${B}, so mark the highlighted squares ✕.`;
+}
+
 function hint() {
   if (over) return;
   clearHint();
   sfx.hint();
+  let cells, msg;
   // 1) an X sitting on a dog's spot is the most useful thing to point out
   const badX = [...solSet].find(i => marks[i] === 1);
-  let target, msg;
   if (badX !== undefined) {
-    target = badX; msg = 'Sniff… this ✕ is hiding a dog’s spot!';
+    cells = [badX]; msg = 'Sniff… this ✕ is hiding a dog’s spot!';
   } else {
-    // 2) otherwise: the next dog a logical solver would find from here
+    // 2) otherwise: the first logical step (from the dogs placed so far) not yet on the board
     const given = [...solSet].filter(i => marks[i] === 2);
     const res = logicSolve(P.regions, given, 4);
-    target = res.order.find(i => marks[i] !== 2);
-    if (target === undefined) target = [...solSet].find(i => marks[i] !== 2);
-    msg = pick(['Sniff sniff… try this square! 🦴', 'My nose says: here!', 'Psst… a pup wants this spot.']);
+    for (const s of res.steps) {
+      if (s.tech === 0) { if (marks[s.place] !== 2) { cells = [s.place]; msg = explain(s); break; } continue; }
+      const todo = s.elim.filter(i => marks[i] !== 1);
+      if (todo.length) { cells = todo; msg = explain(s); break; }
+    }
+    if (!cells) { cells = [[...solSet].find(i => marks[i] !== 2)]; msg = 'Sniff sniff… a dog belongs here! 🦴'; }
   }
   hintsUsed++;
-  hintCell = target;
-  cellEls[target].classList.add('hint');
-  toast(msg);
+  hintCells = cells;
+  for (const i of cells) cellEls[i].classList.add('hint');
+  toast(msg, 7000);
   drawStatus(); save();
 }
 
@@ -1018,10 +1087,10 @@ function newGame(seed) {
 
 // ---------- UI helpers ----------
 let toastT = null;
-function toast(msg) {
+function toast(msg, ms = 2200) {
   const t = $('toast');
   t.textContent = msg; t.classList.add('show');
-  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), 2200);
+  clearTimeout(toastT); toastT = setTimeout(() => t.classList.remove('show'), ms);
 }
 function pick(a) { return a[Math.floor(Math.random() * a.length)]; }
 
