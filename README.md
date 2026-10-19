@@ -20,7 +20,7 @@ Woofdoku keeps that logic and swaps the queens for cartoon dachshunds:
 | One queen per coloured region | One dog per coloured **territory** |
 | Queens can't touch, even diagonally | Dogs need room to stretch, so they can't touch either |
 
-On top of that core it adds hearts, explaining hints, 50 levels of rising difficulty, an endless mode, scores and badges.
+On top of that core it adds hearts, explaining hints, 50-level games of freshly generated puzzles, an endless mode, scores and badges.
 
 ---
 
@@ -49,18 +49,19 @@ Every puzzle has **exactly one solution**, and you can always reach it by logic 
 
 You can also switch **"Tap places"** to *Dog* if you'd rather single-tap to place dogs.
 
-Placing a dog in the wrong square costs a ❤. You have three, and each wrong square can only cost you once.
+Placing a dog in the wrong square costs a ❤. So does marking ✕ on a square where a dog belongs, and that dog is then revealed. You have three hearts, and each square can only cost you one.
 
 ---
 
 ## Features
 
-- **50 levels in five tiers**: Puppy, Easy, Medium, Tricky and Expert. Early levels open with a one-square territory, so the first dog is a gimme. Later ones need "what if" reasoning and pair deductions. Difficulty climbs steadily within each tier.
+- **Games of 50 brand-new puzzles.** Every game is generated from its own random seed, so no two games, and no two players, get the same puzzles. The 50 levels climb through five tiers: Puppy, Easy, Medium, Tricky and Expert. Early levels open with a one-square territory, so the first dog is a gimme. Later ones need "what if" reasoning and pair deductions. Each level aims at the same difficulty every game, so games are comparable.
+- **A total score for every game.** Finish level 50 to see your game's total: your best score on each of its 50 levels, added up. It goes on a completed-games table, and the next game deals 50 new puzzles.
 - **♾️ Endless mode**: freshly generated puzzles that ramp from Easy up to Expert. Hearts carry over between puzzles, a flawless solve wins one back, and the run ends when you're out of hearts.
 - **Hints that teach.** A hint works from your current board and shows the next logical step right on the grid. It outlines the territory, row or column involved, hatches the squares a dog would block, and places a see-through "ghost" dog for "what if" steps. It then explains in plain words, by colour, why the step works.
 - **Scoring**: a level bonus, a speed bonus against par time, a tidiness bonus (fewer ✕ marks is better, and none at all is a big bonus), points for hearts left, and a penalty for hints. Each solve earns 1–3 ⭐.
-- **High scores**: your best score on every level, a top-10 table, and your best Endless runs.
-- **21 badges**, such as *Speedy Sausage* (under a minute), *Clean Paws* (no ✕s), *Lucky Guess*, *Hot Dog Streak*, *Off the Leash* and *Top Dog*.
+- **High scores**: completed games, your best single levels, and your best Endless runs.
+- **22 badges**, such as *Speedy Sausage* (under a minute), *Clean Paws* (no ✕s), *Lucky Guess*, *Hot Dog Streak*, *Off the Leash*, *Top Dog* and *Encore!*.
 - **Built-in art and sound**: the dachshund is hand-drawn SVG, and every bark and chime is synthesised live with the Web Audio API. There are no image or audio files.
 - **Works on phones and desktops**, with large tap targets, reduced-motion support and keyboard play.
 
@@ -80,18 +81,10 @@ A few things follow from that:
 
 ## Running it yourself
 
-The whole game is one self-contained file, [`index.html`](index.html), with no build step and no dependencies.
+The whole game is **one self-contained file**, [`index.html`](index.html). Markup, styles, art, sound, the puzzle generator and the game itself are all inside it. It loads no external scripts, stylesheets, fonts, images or sounds, and there's no build step.
 
-- **Play locally:** download `index.html` and open it in a browser.
+- **Play locally:** download `index.html` and open it in a browser. It works offline.
 - **Host it:** serve the file from any static host. The live version uses GitHub Pages from the `main` branch.
-
-### Project layout
-
-```
-index.html               the entire game: markup, styles, art, sound, generator and UI
-tools/build-levels.js    rebuilds the 50-level ladder embedded in index.html
-README.md                this file
-```
 
 ---
 
@@ -109,13 +102,9 @@ The generator lives inside `index.html`, between the `/*GEN-START*/` and `/*GEN-
    - pairs and triples of territories confined to the same lines.
 
    If the solver finishes, the puzzle needs no guessing. The hardest step it needed, and the hardest step before the first dog, set the puzzle's difficulty.
-5. **Build the ladder.** [`tools/build-levels.js`](tools/build-levels.js) generates a pool of puzzles for each tier, sorts them by solving effort and embeds an evenly spaced ladder of 50 levels in `index.html`. Endless mode uses the same generator in a background Web Worker, preparing the next puzzle while you play the current one.
+5. **Fit the difficulty curve.** Each of the 50 levels has a target solving effort. Level *n* of a game is generated from the game's seed, and keeps producing puzzles for its tier until one lands close to that target. So every game is different, but level 37 is always about as hard as level 37.
 
-To regenerate the levels (requires [Node.js](https://nodejs.org/)):
-
-```
-node tools/build-levels.js
-```
+Puzzles are generated in a **background Web Worker**, built in memory from the page's own code, so the game never freezes. The next level, or the next Endless puzzle, is prepared while you play the current one. Once a level's puzzle is made, it's kept, so replays are instant.
 
 ---
 

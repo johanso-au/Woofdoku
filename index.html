@@ -188,6 +188,8 @@
   .btn.endless span { font-size: 17px; }
   .btn.endless small { font-size: 12px; font-weight: 700; opacity: .92; }
   h3.sec { font-size: 16px; font-weight: 900; margin: 18px 0 0; }
+  .bigscore { display: flex; flex-direction: column; align-items: center; gap: 2px; background: var(--bg); border-radius: 16px; padding: 14px; font-weight: 800; color: var(--muted); }
+  .bigscore b { font-size: 40px; font-weight: 900; color: var(--accent); line-height: 1.1; }
   .lv-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-top: 8px; }
   .tier-h { grid-column: 1 / -1; text-align: left; font-size: 12px; font-weight: 900; color: var(--muted); text-transform: uppercase; letter-spacing: .6px; margin: 8px 0 0; }
   .lv { border: 0; border-radius: 12px; padding: 8px 0 5px; background: var(--soft); color: var(--ink); font: inherit; font-weight: 900; font-size: 16px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 1px; }
@@ -331,6 +333,7 @@
       <li><b>Double-tap / right-click</b> places a dog. Or switch the tap mode to “Dog”.</li>
       <li>A wrong dog costs a <b>❤</b>. So does marking ✕ on a square where a dog belongs, and that dog is then revealed. Lose all 3 and you'll need to try again.</li>
       <li>Every level has exactly <b>one solution</b>, and you can always reach it by logic. You never need to guess.</li>
+      <li>A <b>game</b> is 50 levels that get harder as you go. Every new game deals <b>brand-new puzzles</b>, made just for you. Finish all 50 for your total score, then start the next game.</li>
       <li>A <b>free square</b> has no ✕ and isn't in line with, in the same territory as, or touching a dog you've placed.</li>
       <li><b>🦴 Hint</b> shows the next logical step on the board and explains it.</li>
       <li><b>♾️ Endless mode</b> (in Levels): random puzzles that get harder as you go. Hearts carry over between puzzles, and a flawless solve wins one back. How far can you get?</li>
@@ -663,40 +666,67 @@ function refineRegions(sol, reg, rng, caps, maxSteps = 1500) {
   return cnt === 1;
 }
 
-// Generate `want` verified puzzles that fit `tier`, sort them by effort and return the one
-// at relative position `pos` (0 = easiest). Falls back to the closest miss if none fit.
-function generateForTier(tier, rng, want = 1, pos = 0, n = 0) {
-  const found = [];
-  let fallback = null, fbScore = Infinity;
-  for (let t = 0; t < 700 && found.length < want; t++) {
-    const sol = genSolution(rng);
-    const caps = pickCaps(tier, rng);
-    const reg = genRegions(sol, rng, caps);
-    if (!refineRegions(sol, reg, rng, caps)) continue;
-    const res = logicSolve(reg, [], 4);
-    if (!res.ok || countSolutions(reg) !== 1) continue;
-    const g = gradeSolve(res);
-    const p = { level: n, regions: Array.from(reg), solution: sol, tech: g.max, effort: g.effort, colors: shuffle([0, 1, 2, 3, 4, 5, 6, 7], rng) };
-    if (tier.fit(g)) { found.push(p); continue; }
-    const score = g.opening * 10 + Math.abs(g.max - (tier.from > 25 ? 3 : 2));
-    if (score < fbScore) { fallback = p; fbScore = score; }
-  }
-  if (!found.length) return fallback || Object.assign({}, BACKUP, { level: n });
-  found.sort((a, b) => a.effort - b.effort);
-  return found[Math.round(pos * (found.length - 1))];
+// One attempt at a verified puzzle for `tier`: unique solution, solvable by logic alone.
+// Returns { p, g } (puzzle + grade) or null if this attempt didn't work out.
+function makeCandidate(tier, rng) {
+  const sol = genSolution(rng);
+  const caps = pickCaps(tier, rng);
+  const reg = genRegions(sol, rng, caps);
+  if (!refineRegions(sol, reg, rng, caps)) return null;
+  const res = logicSolve(reg, [], 4);
+  if (!res.ok || countSolutions(reg) !== 1) return null;
+  const g = gradeSolve(res);
+  return { g, p: { regions: Array.from(reg), solution: sol, tech: g.max, effort: g.effort, colors: shuffle([0, 1, 2, 3, 4, 5, 6, 7], rng) } };
 }
 
-// Level n is always the same puzzle (fixed seed), so scores are comparable.
-// (Only used if the pre-built LEVELS data is missing.)
-function generateLevel(n) {
-  const tier = tierOf(n);
-  const pos = tier.to > tier.from ? (n - tier.from) / (tier.to - tier.from) : 0;
-  return generateForTier(tier, mulberry32(n * 104729 + 17), 3, pos, n);
-}
+// The closest miss, used only if nothing fitting the tier turns up in time.
+const missScore = (tier, g) => g.opening * 10 + Math.abs(g.max - (tier.from > 25 ? 3 : 2));
 
 // Endless mode: a fresh random puzzle from tier `tierIdx`.
 function generateRandom(tierIdx, seed) {
-  return Object.assign(generateForTier(TIERS[tierIdx], mulberry32(seed)), { tierIdx, seed });
+  const tier = TIERS[tierIdx], rng = mulberry32(seed);
+  let fallback = null, fb = Infinity;
+  for (let t = 0; t < 700; t++) {
+    const c = makeCandidate(tier, rng);
+    if (!c) continue;
+    if (tier.fit(c.g)) return Object.assign(c.p, { tierIdx, seed });
+    const s = missScore(tier, c.g);
+    if (s < fb) { fallback = c.p; fb = s; }
+  }
+  return Object.assign({}, fallback || BACKUP, { tierIdx, seed });
+}
+
+// The 50-level difficulty curve: target solving effort for each level. Every game gets brand-new
+// puzzles, but level n always aims at the same difficulty, so games are comparable.
+const LEVEL_EFFORT = [
+  0, 1, 2, 3, 4,                                      // Puppy  1-5
+  5, 6, 7, 8, 8, 9, 9, 10,                            // Easy   6-13
+  10, 11, 13, 14, 15, 16, 17, 18, 19, 21, 23, 25,     // Medium 14-25
+  24, 26, 28, 29, 30, 31, 32, 33, 35, 36, 38, 40, 42, // Tricky 26-38
+  34, 35, 36, 38, 39, 41, 42, 43, 44, 45, 47, 49,     // Expert 39-50
+];
+
+// Level n of the game started with `gameSeed`: puzzles that fit level n's tier are generated
+// until one lands close to the curve's target effort (or the closest of a handful is used).
+function generateGameLevel(n, gameSeed) {
+  const tier = tierOf(n), target = LEVEL_EFFORT[n - 1];
+  const rng = mulberry32((gameSeed ^ Math.imul(n, 0x9E3779B1)) >>> 0);
+  const close = Math.max(1, Math.round(target * 0.1));
+  let best = null, bestD = Infinity, fits = 0, fallback = null, fb = Infinity;
+  for (let t = 0; t < 900 && fits < 6; t++) {
+    const c = makeCandidate(tier, rng);
+    if (!c) continue;
+    if (!tier.fit(c.g)) {
+      const s = missScore(tier, c.g);
+      if (s < fb) { fallback = c.p; fb = s; }
+      continue;
+    }
+    fits++;
+    const d = Math.abs(c.g.effort - target);
+    if (d < bestD) { best = c.p; bestD = d; }
+    if (d <= close) break;
+  }
+  return Object.assign({}, best || fallback || BACKUP, { level: n });
 }
 
 // Pre-verified emergency puzzle (unique + logic-solvable; only used if generation somehow fails).
@@ -714,72 +744,6 @@ const BACKUP = {
   ],
 };
 /*GEN-END*/
-
-// =====================================================================
-//  LEVELS: 50 pre-generated puzzles (built by tools/build-levels.js from the
-//  generator above), ordered by difficulty. Format: regions|solution|colours|tech|effort
-// =====================================================================
-/*LEVELS-START*/
-const LEVELS = [
-  '1111000011511000115100223550056635555546777556667775766677777766|41706352|76451023|0|0', // 1 Puppy
-  '1111113022212133222221132624243366644444665554556667544566675555|75164203|04735162|1|2', // 2 Puppy
-  '1011111111114444164442221634222266344252667772526777755277777755|13724605|56731024|1|2', // 3 Puppy
-  '0000011100000111033002116333322164333255644332556662325572222225|47531620|56172043|1|2', // 4 Puppy
-  '0000011100111112000111120444433300444336444633564466366647766666|04752631|20437561|1|6', // 5 Puppy
-  '1000000010101000111112024333122245511622555666227556662277666666|64730251|26745031|1|5', // 6 Easy
-  '4001111344222213442272334422723342277755444775554467775566677755|16370524|24570361|1|6', // 7 Easy
-  '1144400314444003644422336664233366445337667753376667733766777777|60572413|23607145|1|7', // 8 Easy
-  '2111100022211070221110702223307722433077554466776666667766666777|63142057|03157264|1|7', // 9 Easy
-  '1122000011120020112222201344422033444220333444506637745033374440|72514603|50176342|1|8', // 10 Easy
-  '3300111233351112355555123355511275551144757661647776666677766666|35706142|05614273|1|8', // 11 Easy
-  '0000000312200003122233032225530324253333742555537225556377756666|50371462|57423061|1|9', // 12 Easy
-  '0000000100220611200206652222336544223665422433654244466544477555|26041753|54276301|1|10', // 13 Easy
-  '5550000251100332550000325000333355333644577776645557766677777776|31746052|01542736|2|9', // 14 Medium
-  '2222220321144403224444035554443355554446555566667777766677777766|62074153|40536712|2|11', // 15 Medium
-  '0011111102222211022311110023333152234466572336667723367777777777|17264053|71350642|2|13', // 16 Medium
-  '1111120012212200122222001112420311544333555763335757633757777777|60573142|74230651|2|13', // 17 Medium
-  '0000011122000101220200013222241132252441355554447555664477555544|47306251|06571324|2|15', // 18 Medium
-  '3330011133200111322221113332221133222415372774153727665577777777|36205741|16052374|2|15', // 19 Medium
-  '1111006611411116224413165544431675444466755574467777746677777666|46053172|20765431|2|16', // 20 Medium
-  '3000000033000211300022243322224477722224577244445777466677744466|36417052|53140267|2|16', // 21 Medium
-  '2000000020011330220011302222133322111134525511445555566655557766|13057264|40357162|2|18', // 22 Medium
-  '3331002233111222331411423354114233544144535544445556664655577666|42716053|71634052|2|18', // 23 Medium
-  '2221330022113334222223442253334452533444555537465775374655777777|62035174|21053476|2|20', // 24 Medium
-  '0011112211113322111133323333355534477555346755553467777577777755|03741625|35712064|2|23', // 25 Medium
-  '0000111102001111020001110222221322524433255555332557563325577633|06174253|06172543|3|26', // 26 Tricky
-  '1000002211110222111100221113000244332222333355523635575536355755|42730615|21467035|3|28', // 27 Tricky
-  '0003111103332441033324770353444705535547555554476557444765777777|27416305|15270364|3|30', // 28 Tricky
-  '1111110613311106333142263344442633344446335544665357466655574666|60514273|43567120|3|30', // 29 Tricky
-  '1111100022141100244441002244300044433660447556664777666677777666|75041362|34125706|3|31', // 30 Tricky
-  '1112220044122223444422334744422377545233755452637755566377755533|62473150|53614720|3|31', // 31 Tricky
-  '5111120055122220551112225533122455366224755662667755666677777666|62537140|46570123|3|32', // 32 Tricky
-  '0001111533111115334142253344445533464457344674576646775766667777|02514637|54016732|3|33', // 33 Tricky
-  '0000222200112322444443524444335544663557466665776676677766777777|02741536|23746015|3|35', // 34 Tricky
-  '0000000011200200322222203332422233334442366557447667777477774444|70526413|05673421|3|36', // 35 Tricky
-  '2222200322221133222451334244513344455563445555634456666655577766|64170253|24106735|3|36', // 36 Tricky
-  '1112222011113220131332221333227713345227133455773366667766677777|70613524|74361025|3|38', // 37 Tricky
-  '2220011122241111222433112224331124444311446443354666433566773335|46052713|75261340|3|44', // 38 Tricky
-  '0000011120030001223330112333311122433311444355716773557167777777|37142506|24035176|3|34', // 39 Expert
-  '1111100231111122312222223526642255566472565666775666677756777777|61305247|16750243|3|35', // 40 Expert
-  '0000011120011113222211132222211375444413754443337566444377744333|46275130|62534107|3|36', // 41 Expert
-  '3001114233313142333134425333344455544446555664665755666657556666|25736041|65307142|3|36', // 42 Expert
-  '0000001100001111044011123342222255442226577442265774666655777666|25713064|64275301|3|38', // 43 Expert
-  '2000001122000111522001315254033155544311556633135566333357766633|57264031|24530761|3|39', // 44 Expert
-  '0000000011000200411322224433332244443335464553554665333577555555|41753620|72046531|3|41', // 45 Expert
-  '0000000102211111022222212233221133355514335564443335674755557777|05137246|62531074|3|42', // 46 Expert
-  '1111100012111110222444002224333024443300257443005576633057777330|75063142|65174203|3|45', // 47 Expert
-  '0000111120111114263133146633333476663644757666447577644477766444|36057142|30261574|3|47', // 48 Expert
-  '0001111102000111020211113222222134446222446666574666675746777777|15302647|72560314|3|49', // 49 Expert
-  '1111000213310222113602423336024433364224563644245666642466677444|63517024|63725401|3|57', // 50 Expert
-];
-/*LEVELS-END*/
-
-function levelPuzzle(n) {
-  const s = LEVELS[n - 1];
-  if (!s) return generateLevel(n); // data missing: generate on the fly
-  const [reg, sol, col, tech, effort] = s.split('|');
-  return { level: n, regions: [...reg].map(Number), solution: [...sol].map(Number), colors: [...col].map(Number), tech: +tech, effort: +effort };
-}
 
 // =====================================================================
 //  SOUND: tiny Web Audio synth (no files needed)
@@ -858,7 +822,7 @@ const sfx = (() => {
 const PALETTE = ['#ff9e9e', '#ffd6a5', '#fdf1a0', '#b9f2c8', '#b5dcff', '#d6c6ff', '#ffc6ec', '#a8ece6'];
 const COLOR_NAMES = ['red', 'orange', 'yellow', 'green', 'blue', 'purple', 'pink', 'teal'];
 const MAX_HEARTS = 3;
-const SAVE_KEY = 'woofdoku-v2', OLD_KEY = 'woofdoku-v1';
+const SAVE_KEY = 'woofdoku-v3';
 const X_SVG = '<svg class="x" viewBox="0 0 20 20"><use href="#xmark"/></svg>';
 const DOG_SVG = '<svg class="dog" viewBox="0 0 120 70"><use href="#dachs"/></svg>';
 const GHOST_SVG = '<svg class="dog ghost" viewBox="0 0 120 70"><use href="#dachs"/></svg>';
@@ -867,7 +831,13 @@ const $ = id => document.getElementById(id);
 const boardEl = $('board');
 
 let settings = { sound: true, autoX: false, mode: 'x', v: 2 };
-const freshProgress = () => ({ unlocked: 1, current: 1, best: {}, top: [], ach: {}, hintsTotal: 0, streak: 0, failed: {}, runs: [] });
+const rand32 = () => {
+  try { return crypto.getRandomValues(new Uint32Array(1))[0] || 1; } catch (e) { return 1 + Math.floor(Math.random() * 4294967294); }
+};
+// A game is one 50-level playthrough with its own random seed, so every game (and every player)
+// gets different puzzles. Its puzzles are kept once generated, so replays are the same puzzle.
+const newGameRecord = no => ({ no, seed: rand32(), unlocked: 1, current: 1, best: {}, failed: {}, puzzles: {}, done: false, started: Date.now() });
+const freshProgress = () => ({ game: newGameRecord(1), games: [], gamesDone: 0, top: [], ach: {}, hintsTotal: 0, streak: 0, runs: [] });
 let progress = freshProgress();
 
 // current puzzle
@@ -900,7 +870,7 @@ function askPersist() {
 }
 function snapshot() {
   return {
-    play, level, P: play === 'endless' ? P : null, run: run && { ...run },
+    play, level, P, run: run && { ...run },
     marks: Array.from(marks), hearts, seconds, over, hintsUsed, everX: [...everX], lucky: [...luckyCells], wrong: [...wrongCells], revealed: [...revealed],
   };
 }
@@ -986,8 +956,8 @@ function drawStatus() {
   if (endless) {
     $('meta').textContent = `Run score ${fmtNum(run.score)} · ${run.solved} solved · Par ${fmtTime(parTime(scoreLevel()))}`;
   } else {
-    const best = progress.best[level];
-    $('meta').textContent = `Par ${fmtTime(parTime(level))}` + (best ? ` · Best ${fmtNum(best.score)} ${'★'.repeat(best.stars)}` : '') +
+    const best = progress.game.best[level];
+    $('meta').textContent = `Game #${progress.game.no} · Par ${fmtTime(parTime(level))}` + (best ? ` · Best ${fmtNum(best.score)} ${'★'.repeat(best.stars)}` : '') +
       ` · ${Object.keys(progress.ach).length}/${ACHIEVEMENTS.length} badges`;
   }
 }
@@ -1431,7 +1401,8 @@ const ACHIEVEMENTS = [
   { id: 'comeback', icon: '💪', name: 'Never Give Up', desc: 'Solve a level you previously ran out of hearts on.' },
   { id: 'l10', icon: '🦴', name: 'Good Boy', desc: 'Complete level 10.' },
   { id: 'l25', icon: '🎒', name: 'Halfway Hound', desc: 'Complete level 25.' },
-  { id: 'l50', icon: '👑', name: 'Top Dog', desc: 'Complete all 50 levels.' },
+  { id: 'l50', icon: '👑', name: 'Top Dog', desc: 'Complete all 50 levels of a game.' },
+  { id: 'encore', icon: '🔁', name: 'Encore!', desc: 'Complete two full games.' },
   { id: 'stars10', icon: '⭐', name: 'Star Collector', desc: 'Earn 3 stars on 10 different levels.' },
   { id: 'roller', icon: '💯', name: 'High Roller', desc: 'Score 2,000+ points on a single level.' },
   { id: 'night', icon: '🌙', name: 'Night Owl', desc: 'Solve a level between midnight and 5 am.' },
@@ -1454,6 +1425,10 @@ function unlock(id) {
 // =====================================================================
 const scoreRow = (label, val, cls = '') => `<span class="${cls}">${label}</span><span class="${cls}">${val}</span>`;
 const signed = v => (v < 0 ? '−' : '+') + fmtNum(Math.abs(v));
+const gameTotals = gm => {
+  const b = Object.values(gm.best);
+  return { score: b.reduce((a, x) => a + x.score, 0), stars: b.reduce((a, x) => a + x.stars, 0), levels: b.length };
+};
 
 function win() {
   over = true; stopTimer(); clearHint();
@@ -1461,7 +1436,7 @@ function win() {
   const lost = (endless ? run.heartsStart : MAX_HEARTS) - hearts; // hearts lost on THIS puzzle
   const r = { level: scoreLevel(), seconds, xCount: everX.size, hearts, hints: hintsUsed };
   const sc = computeScore(r), stars = starsFor({ hearts: MAX_HEARTS - lost, hints: hintsUsed });
-  let flags = '';
+  let flags = '', complete = null;
 
   if (endless) {
     run.solved++;
@@ -1472,27 +1447,28 @@ function win() {
     if (run.solved >= 5) unlock('leash');
     if (run.solved >= 15) unlock('marathon');
   } else {
-    const prev = progress.best[level];
-    progress.best[level] = {
+    const gm = progress.game;
+    const prev = gm.best[level];
+    gm.best[level] = {
       score: Math.max(sc.total, prev ? prev.score : 0),
       stars: Math.max(stars, prev ? prev.stars : 0),
       time: Math.min(seconds, prev ? prev.time : Infinity),
     };
-    if (level < MAX_LEVEL) progress.unlocked = Math.max(progress.unlocked, level + 1);
-    const entry = { score: sc.total, level, time: seconds, stars, date: Date.now() };
+    if (level < MAX_LEVEL) gm.unlocked = Math.max(gm.unlocked, level + 1);
+    const entry = { score: sc.total, level, game: gm.no, time: seconds, stars, date: Date.now() };
     progress.top.push(entry);
     progress.top.sort((a, b) => b.score - a.score);
     progress.top = progress.top.slice(0, 10);
     const rank = progress.top.indexOf(entry);
     if (prev && sc.total > prev.score) flags += '<div class="flag">🎉 New best for this level!</div>';
-    if (rank >= 0 && rank < 3 && progress.top.length > 1) flags += `<div class="flag">🏆 #${rank + 1} on your high-score table</div>`;
-    const done = Object.keys(progress.best).map(Number);
+    if (rank >= 0 && rank < 3 && progress.top.length > 1) flags += `<div class="flag">🏆 #${rank + 1} on your best-levels table</div>`;
+    const done = Object.keys(gm.best).map(Number);
     unlock('first');
-    if (progress.failed[level]) { unlock('comeback'); delete progress.failed[level]; }
+    if (gm.failed[level]) { unlock('comeback'); delete gm.failed[level]; }
     if (done.includes(10)) unlock('l10');
     if (done.includes(25)) unlock('l25');
-    if (done.length >= MAX_LEVEL) unlock('l50');
-    if (Object.values(progress.best).filter(b => b.stars === 3).length >= 10) unlock('stars10');
+    if (Object.values(gm.best).filter(b => b.stars === 3).length >= 10) unlock('stars10');
+    if (level === MAX_LEVEL && !gm.done) complete = finishGame();
   }
 
   // badges for both modes
@@ -1513,20 +1489,38 @@ function win() {
   boardEl.classList.add('won');
   setTimeout(() => sfx.win(), 250);
   confetti();
+  if (complete) setTimeout(confetti, 1600);
+  const breakdown = `
+    <div class="breakdown">
+      ${scoreRow(endless ? `${TIERS[P.tierIdx].name} puzzle` : `Level ${level}`, signed(sc.base))}
+      ${scoreRow(`Speed (par ${fmtTime(sc.par)})`, signed(sc.speed))}
+      ${scoreRow(everX.size ? `Tidy paws (${everX.size} ✕)` : 'No ✕s at all! 🧼', signed(sc.tidy))}
+      ${scoreRow(`Hearts left (${r.hearts})`, signed(sc.heartsPts))}
+      ${hintsUsed ? scoreRow(`Hints (${hintsUsed})`, signed(sc.hintPts), 'neg') : ''}
+      ${scoreRow('Score', fmtNum(sc.total), 'tot')}
+    </div>`;
   setTimeout(() => {
+    if (complete) {
+      openModal(`
+        <svg class="big" viewBox="0 0 120 70"><use href="#dachs"/></svg>
+        <h2>🏆 Game complete!</h2>
+        <p class="sub">You solved all ${MAX_LEVEL} levels of Game #${complete.no}.</p>
+        <div class="bigscore"><span>Total score</span><b>${fmtNum(complete.score)}</b><span>⭐ ${complete.stars} of ${MAX_LEVEL * 3} stars</span></div>
+        ${complete.rank === 0 && progress.games.length > 1 ? '<div class="flag">🎉 Your best game yet!</div>' : ''}
+        ${complete.rank > 0 && complete.rank < 10 ? `<div class="flag">#${complete.rank + 1} on your completed-games table</div>` : ''}
+        <p class="sub" style="margin:12px 0 6px">Level ${level}: ${fmtNum(sc.total)} points in ${fmtTime(seconds)}</p>
+        <div class="row">
+          <button class="btn primary" data-act="newgame">🐾 New game: 50 new puzzles</button>
+          <button class="btn" data-act="close">Close</button>
+        </div>`);
+      return;
+    }
     openModal(`
       <svg class="big" viewBox="0 0 120 70"><use href="#dachs"/></svg>
       <div class="stars">${[0, 1, 2].map(k => `<span class="${k < stars ? '' : 'dim'}">⭐</span>`).join('')}</div>
       <h2>${pick(['Pawsome!', 'Good dogs!', 'Wiener winner!', 'Tail-wagging work!'])}</h2>
       <p class="sub">${endless ? `Endless puzzle ${run.k}` : `Level ${level}`} solved in ${fmtTime(seconds)}</p>
-      <div class="breakdown">
-        ${scoreRow(endless ? `${TIERS[P.tierIdx].name} puzzle` : `Level ${level}`, signed(sc.base))}
-        ${scoreRow(`Speed (par ${fmtTime(sc.par)})`, signed(sc.speed))}
-        ${scoreRow(everX.size ? `Tidy paws (${everX.size} ✕)` : 'No ✕s at all! 🧼', signed(sc.tidy))}
-        ${scoreRow(`Hearts left (${r.hearts})`, signed(sc.heartsPts))}
-        ${hintsUsed ? scoreRow(`Hints (${hintsUsed})`, signed(sc.hintPts), 'neg') : ''}
-        ${scoreRow('Score', fmtNum(sc.total), 'tot')}
-      </div>
+      ${breakdown}
       ${flags}
       <div class="row">
         ${endless ? '<button class="btn primary" data-act="next">Next puzzle ▶</button><button class="btn" data-act="levels">🗺️ Levels</button>'
@@ -1534,6 +1528,19 @@ function win() {
             '<button class="btn" data-act="replay">↻ Replay</button>'}
       </div>`);
   }, 1100);
+}
+
+// All 50 levels solved: record the game's total (sum of best level scores) on the games table.
+function finishGame() {
+  const gm = progress.game;
+  gm.done = true;
+  const t = gameTotals(gm);
+  const entry = { no: gm.no, score: t.score, stars: t.stars, date: Date.now() };
+  progress.games = (progress.games || []).concat(entry).sort((a, b) => b.score - a.score).slice(0, 10);
+  progress.gamesDone = (progress.gamesDone || 0) + 1;
+  unlock('l50');
+  if (progress.gamesDone >= 2) unlock('encore');
+  return Object.assign({ rank: progress.games.indexOf(entry) }, entry);
 }
 
 function lose() {
@@ -1557,7 +1564,7 @@ function lose() {
       </div>`, 'sad'), 900);
     return;
   }
-  progress.failed[level] = true;
+  progress.game.failed[level] = true;
   save();
   setTimeout(() => sfx.lose(), 500);
   setTimeout(() => openModal(`
@@ -1586,28 +1593,31 @@ function confetti() {
 }
 
 // =====================================================================
-//  ENDLESS PUZZLES: generated in a background worker (so the page never
-//  freezes), with the next puzzle prepared while you play the current one
+//  PUZZLE GENERATION: every game and every Endless puzzle is generated
+//  fresh, in a background worker (so the page never freezes), with the
+//  next puzzle prepared while you play the current one
 // =====================================================================
 const GEN_SRC = (() => {
   const s = document.currentScript ? document.currentScript.textContent : '';
   const a = s.indexOf('/*GEN-' + 'START*/'), b = s.indexOf('/*GEN-' + 'END*/');
   return a >= 0 && b > a ? s.slice(a, b) : '';
 })();
+const runJob = j => j.level ? generateGameLevel(j.level, j.seed) : generateRandom(j.tierIdx, j.seed);
 let genWorker = null, workerOk = false, jobId = 0;
 const jobs = new Map();
 // If the worker can't run (some browsers / file:// setups fail silently), finish every job on the page.
 function abandonWorker() {
   if (genWorker) { try { genWorker.terminate(); } catch (e) { /* ignore */ } }
   genWorker = false;
-  for (const [id, j] of jobs) { jobs.delete(id); clearTimeout(j.timer); j.resolve(generateRandom(j.tierIdx, j.seed)); }
+  for (const [id, j] of jobs) { jobs.delete(id); clearTimeout(j.timer); j.resolve(runJob(j.job)); }
 }
 function getWorker() {
   if (genWorker !== null) return genWorker;
   genWorker = false;
   if (!GEN_SRC || !window.Worker || !window.Blob) return genWorker;
   try {
-    const code = GEN_SRC + '\nonmessage = e => postMessage(e.data.ping ? { pong: 1 } : { id: e.data.id, p: generateRandom(e.data.tierIdx, e.data.seed) });';
+    const code = GEN_SRC + '\nonmessage = e => { const d = e.data; postMessage(d.ping ? { pong: 1 } : ' +
+      '{ id: d.id, p: d.level ? generateGameLevel(d.level, d.seed) : generateRandom(d.tierIdx, d.seed) }); };';
     const w = new Worker(URL.createObjectURL(new Blob([code], { type: 'text/javascript' })));
     w.onmessage = e => {
       if (e.data.pong) { workerOk = true; return; }
@@ -1621,27 +1631,46 @@ function getWorker() {
   } catch (e) { genWorker = false; }
   return genWorker;
 }
-function requestPuzzle(tierIdx) {
-  const seed = 1 + Math.floor(Math.random() * 2147483646);
+// job: { level, seed } for a game level, or { tierIdx, seed } for an Endless puzzle
+function requestPuzzle(job) {
   return new Promise(resolve => {
     const w = getWorker();
-    if (!w) { setTimeout(() => resolve(generateRandom(tierIdx, seed)), 30); return; }
+    if (!w) { setTimeout(() => resolve(runJob(job)), 30); return; }
     const id = ++jobId;
-    // watchdog: a healthy worker answers in well under this; otherwise generate on the page
-    const timer = setTimeout(() => { if (jobs.has(id)) abandonWorker(); }, 15000);
-    jobs.set(id, { resolve, tierIdx, seed, timer });
-    w.postMessage({ id, tierIdx, seed });
+    // watchdog: a healthy worker answers well within this; otherwise generate on the page
+    const timer = setTimeout(() => { if (jobs.has(id)) abandonWorker(); }, 60000);
+    jobs.set(id, { resolve, job, timer });
+    w.postMessage(Object.assign({ id }, job));
   });
 }
+
+// ---------- Game levels: generated from the game's own random seed, kept once made ----------
+const levelJobs = new Map();
+function levelPuzzle(n) {
+  const gm = progress.game;
+  if (gm.puzzles[n]) return Promise.resolve(gm.puzzles[n]);
+  const key = `${gm.seed}:${n}`;
+  if (!levelJobs.has(key)) {
+    levelJobs.set(key, requestPuzzle({ level: n, seed: gm.seed }).then(p => {
+      levelJobs.delete(key);
+      if (progress.game.seed === gm.seed) { progress.game.puzzles[n] = p; save(); }
+      return p;
+    }));
+  }
+  return levelJobs.get(key);
+}
+const prefetchLevel = n => { if (n >= 1 && n <= MAX_LEVEL) levelPuzzle(n); };
+
+// ---------- Endless ----------
 let prefetched = null; // { tierIdx, promise }
 function prefetchNext() {
   if (!run) return;
   const t = endlessTierIdx(run.k + 1);
-  if (!prefetched || prefetched.tierIdx !== t) prefetched = { tierIdx: t, promise: requestPuzzle(t) };
+  if (!prefetched || prefetched.tierIdx !== t) prefetched = { tierIdx: t, promise: requestPuzzle({ tierIdx: t, seed: rand32() }) };
 }
 function takePuzzle(tierIdx) {
   if (prefetched && prefetched.tierIdx === tierIdx) { const p = prefetched.promise; prefetched = null; return p; }
-  return requestPuzzle(tierIdx);
+  return requestPuzzle({ tierIdx, seed: rand32() });
 }
 
 let loadingT = null, loadingBusy = false;
@@ -1690,43 +1719,53 @@ function openModal(html, cls = '') {
 function closeModal() { $('overlay').classList.remove('show'); }
 
 function showLevels() {
-  const runs = progress.runs || [];
+  const gm = progress.game, runs = progress.runs || [];
   const snapRun = endlessSnap && endlessSnap.run;
   const sub = play === 'endless' && hearts > 0 ? `Continue run · puzzle ${run.k}`
     : snapRun ? `Resume run · puzzle ${snapRun.k} · ${fmtNum(snapRun.score)} pts`
     : runs.length ? `Best run: ${runs[0].solved} solved · ${fmtNum(runs[0].score)} pts`
     : 'Random puzzles that keep getting harder';
-  let html = `<button class="close" data-act="close" aria-label="Close">✕</button><h2>Levels</h2>
-    <button class="btn primary endless" data-act="endless"><span>♾️ Endless mode</span><small>${sub}</small></button>
+  const t = gameTotals(gm);
+  let html = `<button class="close" data-act="close" aria-label="Close">✕</button><h2>Game #${gm.no}</h2>
+    <p class="sub" style="margin-bottom:8px">${t.levels}/${MAX_LEVEL} levels · ${fmtNum(t.score)} points · ⭐ ${t.stars}</p>
+    ${gm.done ? `<div class="flag" style="margin:0 0 8px">🏆 Complete! Final score ${fmtNum(t.score)}</div>
+      <button class="btn primary endless" data-act="newgame"><span>🐾 New game</span><small>50 brand-new puzzles</small></button>` : ''}
+    <button class="btn ${gm.done ? '' : 'primary '}endless" data-act="endless"><span>♾️ Endless mode</span><small>${sub}</small></button>
     <div class="lv-grid">`;
-  for (const t of TIERS) {
-    html += `<div class="tier-h">${t.name}</div>`;
-    for (let n = t.from; n <= t.to; n++) {
-      const b = progress.best[n], locked = n > progress.unlocked;
+  for (const tr of TIERS) {
+    html += `<div class="tier-h">${tr.name}</div>`;
+    for (let n = tr.from; n <= tr.to; n++) {
+      const b = gm.best[n], locked = n > gm.unlocked;
       const st = b ? '★'.repeat(b.stars) + '☆'.repeat(3 - b.stars) : '';
       html += `<button class="lv${b ? ' done' : ''}${play === 'level' && n === level ? ' cur' : ''}" data-lv="${n}" ${locked ? 'disabled aria-label="Locked"' : ''}>${locked ? '🔒' : n}<small>${st}</small></button>`;
     }
   }
-  openModal(html + '</div>');
+  html += '</div>';
+  if (!gm.done) html += '<button class="linkbtn" data-act="newgame">Start a new game with 50 new puzzles</button>';
+  openModal(html);
 }
 
 function showScores() {
-  const best = Object.values(progress.best);
-  const total = best.reduce((a, b) => a + b.score, 0);
-  const starSum = best.reduce((a, b) => a + b.stars, 0);
+  const gm = progress.game, t = gameTotals(gm);
+  const games = (progress.games || []).map((e, k) => `<tr><td>${k + 1}</td><td>Game ${e.no}</td><td><b>${fmtNum(e.score)}</b></td><td>⭐ ${e.stars}</td><td>${new Date(e.date).toLocaleDateString()}</td></tr>`).join('');
   const rows = progress.top.map((e, k) => `<tr><td>${k + 1}</td><td>Lv ${e.level}</td><td><b>${fmtNum(e.score)}</b></td><td>${fmtTime(e.time)}</td><td>${'★'.repeat(e.stars)}</td></tr>`).join('');
   const runs = (progress.runs || []).map((e, k) => `<tr><td>${k + 1}</td><td>${e.solved}</td><td><b>${fmtNum(e.score)}</b></td><td>${new Date(e.date).toLocaleDateString()}</td></tr>`).join('');
   openModal(`
     <button class="close" data-act="close" aria-label="Close">✕</button>
     <h2>🏆 High scores</h2>
+    <p class="sub" style="margin:0">Game #${gm.no}${gm.done ? ' (complete)' : ' so far'}</p>
     <div class="totals">
-      <div><b>${fmtNum(total)}</b><span>total score</span></div>
-      <div><b>${best.length}/${MAX_LEVEL}</b><span>levels</span></div>
-      <div><b>${starSum}</b><span>stars</span></div>
+      <div><b>${fmtNum(t.score)}</b><span>total score</span></div>
+      <div><b>${t.levels}/${MAX_LEVEL}</b><span>levels</span></div>
+      <div><b>${t.stars}</b><span>stars</span></div>
     </div>
+    <p class="sub" style="margin:4px 0 0;font-size:12.5px">A game's total score adds up your best score on each of its 50 levels.</p>
+    <h3 class="sec">🏁 Completed games</h3>
+    ${games ? `<table class="scores"><tr><th>#</th><th>Game</th><th>Score</th><th>Stars</th><th>Date</th></tr>${games}</table>`
+      : '<p class="sub" style="margin-top:6px">Finish all 50 levels to get on this board!</p>'}
+    <h3 class="sec">⭐ Best single levels</h3>
     ${rows ? `<table class="scores"><tr><th>#</th><th>Level</th><th>Score</th><th>Time</th><th>Stars</th></tr>${rows}</table>`
-      : '<p class="sub">No scores yet. Solve a level to get on the board!</p>'}
-    <p class="sub" style="margin:10px 0 0;font-size:12.5px">Total score adds up your best score on each level.</p>
+      : '<p class="sub" style="margin-top:6px">No scores yet. Solve a level to get on the board!</p>'}
     <h3 class="sec">♾️ Best Endless runs</h3>
     ${runs ? `<table class="scores"><tr><th>#</th><th>Solved</th><th>Score</th><th>Date</th></tr>${runs}</table>`
       : '<p class="sub" style="margin-top:6px">No finished runs yet.</p>'}
@@ -1737,6 +1776,17 @@ function showBadges() {
   const got = ACHIEVEMENTS.filter(a => progress.ach[a.id]).length;
   const list = ACHIEVEMENTS.map(a => `<div class="badge${progress.ach[a.id] ? '' : ' locked'}"><div class="bi">${a.icon}</div><div><b>${a.name}</b><span>${a.desc}</span></div></div>`).join('');
   openModal(`<button class="close" data-act="close" aria-label="Close">✕</button><h2>🎖️ Badges</h2><p class="sub">${got} of ${ACHIEVEMENTS.length} unlocked</p><div class="badges">${list}</div>`);
+}
+
+function newGame() {
+  const gm = progress.game;
+  const started = Object.keys(gm.best).length > 0 && !gm.done;
+  if (started && !window.confirm(`Start a new game? Game #${gm.no} isn't finished yet, and its level progress will be replaced by 50 new puzzles.`)) return;
+  progress.game = newGameRecord((gm.no || 0) + 1);
+  levelJobs.clear();
+  closeModal();
+  startLevel(1);
+  toast(`🐾 Game #${progress.game.no}: 50 brand-new puzzles!`, 2600);
 }
 
 $('overlay').addEventListener('click', e => {
@@ -1752,9 +1802,11 @@ $('overlay').addEventListener('click', e => {
   if (a === 'levels') showLevels();
   if (a === 'endless') startEndless();
   if (a === 'newrun') nextEndless(true);
-  if (a === 'reset' && window.confirm('Reset all levels, scores, Endless runs and badges? This cannot be undone.')) {
+  if (a === 'newgame') newGame();
+  if (a === 'reset' && window.confirm('Reset all games, scores, Endless runs and badges? This cannot be undone.')) {
     progress = freshProgress();
     endlessSnap = null; play = 'level'; run = null;
+    levelJobs.clear();
     closeModal(); startLevel(1);
   }
 });
@@ -1775,22 +1827,27 @@ function resetBoard(h) {
   $('hintbox').hidden = true;
 }
 
-function startLevel(n) {
-  if (play === 'endless' && hearts > 0) endlessSnap = snapshot(); // pause the run so it can be resumed
-  play = 'level'; run = null;
+async function startLevel(n) {
+  if (loadingBusy) return;
   n = Math.max(1, Math.min(MAX_LEVEL, n));
+  if (play === 'endless' && hearts > 0) { endlessSnap = snapshot(); play = 'level'; run = null; } // pause the run
+  loadingBusy = true; showLoading(true);
+  const p = await levelPuzzle(n);
+  showLoading(false); loadingBusy = false;
+  play = 'level'; run = null;
   level = n;
-  setPuzzle(levelPuzzle(n));
-  progress.current = n;
+  setPuzzle(p);
+  progress.game.current = n;
   resetBoard(MAX_HEARTS);
   buildBoard(); drawHearts(); drawStatus(); save();
+  prefetchLevel(n + 1);
 }
 
 function restore(g) {
   play = g.play === 'endless' ? 'endless' : 'level';
   run = g.run || null;
-  if (play === 'endless') setPuzzle(g.P);
-  else { level = g.level; setPuzzle(levelPuzzle(g.level)); }
+  if (play === 'level') level = g.level;
+  setPuzzle(g.P);
   resetBoard(g.hearts);
   marks = Uint8Array.from(g.marks); seconds = g.seconds || 0; over = !!g.over; hintsUsed = g.hintsUsed || 0;
   everX = new Set(g.everX || []); luckyCells = new Set(g.lucky || []); wrongCells = new Set(g.wrong || []); revealed = new Set(g.revealed || []);
@@ -1833,10 +1890,22 @@ $('autoBtn').onclick = () => {
 document.addEventListener('visibilitychange', save);
 
 (function boot() {
-  const saved = store.get(SAVE_KEY);
-  const old = !saved && store.get(OLD_KEY);
-  if (old && old.settings) { // carry settings over from version 1
-    settings = Object.assign(settings, old.settings, { autoX: old.settings.v ? old.settings.autoX : false, v: 2 });
+  let saved = store.get(SAVE_KEY);
+  if (!saved) {
+    // Upgrading from the fixed-levels version: keep settings, badges, high scores and Endless,
+    // and start Game #1 (the old level progress belonged to puzzles that no longer exist).
+    const v2 = store.get('woofdoku-v2'), v1 = !v2 && store.get('woofdoku-v1');
+    if (v2) {
+      const o = v2.progress || {};
+      saved = {
+        settings: v2.settings,
+        progress: { ach: o.ach || {}, top: o.top || [], runs: o.runs || [], hintsTotal: o.hintsTotal || 0, streak: o.streak || 0 },
+        endlessSnap: v2.endlessSnap || null,
+        game: v2.game && v2.game.play === 'endless' ? v2.game : null,
+      };
+    } else if (v1 && v1.settings) {
+      settings = Object.assign(settings, v1.settings, { autoX: v1.settings.v ? v1.settings.autoX : false, v: 2 });
+    }
   }
   if (saved) {
     if (saved.settings) settings = Object.assign(settings, saved.settings);
@@ -1846,20 +1915,20 @@ document.addEventListener('visibilitychange', save);
   drawSettings(); setMode(settings.mode);
 
   const g = saved && saved.game;
-  const valid = g && (g.play === 'endless' ? g.P && g.run : g.level >= 1 && g.level <= MAX_LEVEL);
+  const valid = g && g.P && (g.play === 'endless' ? g.run : g.level >= 1 && g.level <= MAX_LEVEL);
   if (valid) {
     restore(g);
-    if (!over) { if (play === 'endless') prefetchNext(); return; }
+    if (!over) { if (play === 'endless') prefetchNext(); else prefetchLevel(level + 1); return; }
     if (play === 'endless') {
       if (hearts > 0) nextEndless(false);
-      else { play = 'level'; run = null; startLevel(progress.current || 1); }
+      else { play = 'level'; run = null; startLevel(progress.game.current || 1); }
     } else {
       startLevel(hearts > 0 && dogCount() === 8 ? Math.min(MAX_LEVEL, level + 1) : level);
     }
     return;
   }
   $('howto').open = true;
-  startLevel(progress.current || 1);
+  startLevel(progress.game.current || 1);
 })();
 
 })();
