@@ -905,10 +905,27 @@ function buildBoard() {
     el.className = 'cell';
     el.dataset.i = i;
     el.setAttribute('role', 'gridcell');
-    el.style.background = PALETTE[P.colors[reg[i]]];
-    const thick = '3px solid var(--line)', thin = '1px solid var(--thin)';
-    if (r > 0) el.style.borderTop = reg[i] !== reg[i - 8] ? thick : thin;
-    if (c > 0) el.style.borderLeft = reg[i] !== reg[i - 1] ? thick : thin;
+    el.style.backgroundColor = PALETTE[P.colors[reg[i]]];
+    // Each square draws only its top and left edges. Territory edges are real 3px borders; the
+    // thin grid lines are painted as background, so a thick and a thin edge never meet as
+    // borders (browsers bevel that join, leaving a little notch).
+    const topThick = r > 0 && reg[i] !== reg[i - 8], leftThick = c > 0 && reg[i] !== reg[i - 1];
+    const layers = [], sizes = [], ink = col => `linear-gradient(${col}, ${col})`;
+    // Thick lines meeting at this square's top-left corner without running along its own edges
+    // (e.g. the bottom-right corner of a 1-square territory): fill that 3px corner so they join up.
+    if (r > 0 && c > 0 && !topThick && !leftThick && (reg[i - 9] !== reg[i - 8] || reg[i - 9] !== reg[i - 1])) {
+      layers.push(ink('var(--line)')); sizes.push('3px 3px');
+    }
+    if (topThick) el.style.borderTop = '3px solid var(--line)';
+    else if (r > 0) { layers.push(ink('var(--thin)')); sizes.push('100% 1px'); }
+    if (leftThick) el.style.borderLeft = '3px solid var(--line)';
+    else if (c > 0) { layers.push(ink('var(--thin)')); sizes.push('1px 100%'); }
+    if (layers.length) {
+      el.style.backgroundImage = layers.join(', ');
+      el.style.backgroundSize = sizes.join(', ');
+      el.style.backgroundRepeat = 'no-repeat';
+      el.style.backgroundOrigin = 'border-box';
+    }
     boardEl.appendChild(el);
     cellEls.push(el);
   }
